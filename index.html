@@ -64,7 +64,14 @@ button,input,textarea,select{font:inherit}button{cursor:pointer}.hidden{display:
 (() => {
 'use strict';
 const APP_ROOT='omni-pos-v1';
-const peers=['https://relay.peer.ooo/gun'];
+const PRIVATE_RELAY='';
+const peers=[
+  ...(PRIVATE_RELAY?[PRIVATE_RELAY]:[]),
+  'https://relay.peer.ooo/gun',
+  'https://gun-manhattan.herokuapp.com/gun',
+  'https://gun-us.herokuapp.com/gun',
+  'https://gunjs.herokuapp.com/gun'
+];
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const money=n=>`BHD ${Number(n||0).toFixed(3)}`;
@@ -75,8 +82,13 @@ const gun=Gun({peers,localStorage:true,retry:Infinity});
 const root=gun.get(APP_ROOT);
 function upsert(arr,d,k){const i=arr.findIndex(x=>x.id===(d?.id||k));if(!d){if(i>=0)arr.splice(i,1);return}const row={...clean(d),id:d.id||k};if(i>=0)arr[i]=row;else arr.push(row)}
 const readList=node=>new Promise(resolve=>{const rows=[];node.map().once((d,k)=>{if(d)rows.push({...clean(d),id:d.id||k})});setTimeout(()=>resolve(rows),900)});
+const connectedRelays=new Set();
+function peerName(peer){return String(peer?.url||peer?.wire?.url||peer||'relay').replace(/^https?:\/\//,'').replace(/^wss?:\/\//,'')}
 function setConn(ok,text){$('#connDot').classList.toggle('online',ok);$('#connText').textContent=text}
-gun.on('hi',()=>setConn(true,'Connected to relay.peer.ooo/gun'));gun.on('bye',()=>setConn(false,'Reconnecting'));setConn(false,'Connecting to relay.peer.ooo/gun');setTimeout(()=>{if(!$('#connDot').classList.contains('online'))setConn(false,'Relay not confirmed; local cache may be shown')},4500);
+gun.on('hi',peer=>{connectedRelays.add(peerName(peer));setConn(true,`Online sync active · ${connectedRelays.size} relay${connectedRelays.size===1?'':'s'}`)});
+gun.on('bye',peer=>{connectedRelays.delete(peerName(peer));setConn(connectedRelays.size>0,connectedRelays.size?`Online sync active · ${connectedRelays.size} relay${connectedRelays.size===1?'':'s'}`:'No relay connection; local cache only')});
+setConn(false,`Connecting to ${peers.length} online relays`);
+setTimeout(()=>{if(!connectedRelays.size)setConn(false,'No online relay connection; data is local only')},6500);
 L.Icon.Default.mergeOptions({iconRetinaUrl:'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',iconUrl:'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',shadowUrl:'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png'});
 function publicMirror(id){return state.publicVendors.find(x=>x.id===id)||{}}
 function approved(v){return v.adminApproved===true||publicMirror(v.id).adminApproved===true}
