@@ -30,6 +30,7 @@ button,input,textarea,select{font:inherit}button{cursor:pointer}.hidden{display:
       <button data-view="orders">Orders</button>
       <button data-view="users">Online users</button>
       <button data-view="chats">Vendor chat</button>
+      <button data-view="resets">Password resets</button>
       <button data-view="mapView">Map</button>
     </nav>
     <div class="status"><span id="connDot" class="dot"></span><span id="connText">Connecting to GUN</span></div>
@@ -56,6 +57,7 @@ button,input,textarea,select{font:inherit}button{cursor:pointer}.hidden{display:
           <div class="card pad"><div class="head"><h2 id="chatTitle">Select a vendor</h2></div><div id="chatLog" class="chat-log"></div><form id="chatForm" class="grid"><div class="field"><label>Message</label><textarea id="chatText" required></textarea></div><button class="btn primary">Send</button></form></div>
         </div>
       </section>
+      <section id="resets" class="view"><div class="card pad"><div class="head"><h2>Password reset requests</h2></div><div id="resetTable"></div></div></section>
       <section id="mapView" class="view"><div class="card pad"><div class="head"><h2>Approved public vendors</h2></div><div id="map"></div></div></section>
     </div>
   </main>
@@ -68,17 +70,17 @@ const PRIVATE_RELAY='';
 const peers=[
   ...(PRIVATE_RELAY?[PRIVATE_RELAY]:[]),
   'https://gun-manhattan.herokuapp.com/gun',
-    'https://peer.wallie.io/gun',
-    'https://gundb-relay-mlccl.ondigitalocean.app/gun',
-    'https://gun.defucc.me/gun',
-    'https://a.talkflow.team/gun'
+  'https://peer.wallie.io/gun',
+  'https://gundb-relay-mlccl.ondigitalocean.app/gun',
+  'https://gun.defucc.me/gun',
+  'https://a.talkflow.team/gun'
 ];
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 const esc=s=>String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const money=n=>`BHD ${Number(n||0).toFixed(3)}`;
 const clean=o=>{if(!o||typeof o!=='object')return o;const out={};Object.keys(o).forEach(k=>{if(k!=='_'&&o[k]!==null&&typeof o[k]!=='object')out[k]=o[k]});return out};
 const uid=(p='id')=>`${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,9)}`;
-const state={vendors:[],publicVendors:[],orders:[],customers:[],presence:[],chats:[],messages:[],selectedVendor:'',vendorFilter:'all',backfilled:{},map:null,markers:[]};
+const state={vendors:[],publicVendors:[],orders:[],customers:[],presence:[],chats:[],messages:[],resetRequests:[],selectedVendor:'',vendorFilter:'all',backfilled:{},map:null,markers:[]};
 const gun=Gun({peers,localStorage:true,retry:Infinity});
 const root=gun.get(APP_ROOT);
 function upsert(arr,d,k){const i=arr.findIndex(x=>x.id===(d?.id||k));if(!d){if(i>=0)arr.splice(i,1);return}const row={...clean(d),id:d.id||k};if(i>=0)arr[i]=row;else arr.push(row)}
@@ -98,7 +100,7 @@ function publicVendors(){const rows=state.publicVendors.length?state.publicVendo
 function status(v){if(suspended(v))return '<span class="pill bad">Suspended</span>';if(approved(v))return '<span class="pill ok">Approved</span>';return '<span class="pill warn">Pending</span>'}
 function vendorIcon(v){const src=v.logo||v.shopfront||'';return L.divIcon({className:'',iconSize:[40,40],iconAnchor:[20,40],popupAnchor:[0,-36],html:`<div class="vendor-map-icon">${src?`<img src="${src}" alt="">`:esc((v.crName||'V')[0])}</div>`})}
 function render(){
-  renderMetrics();renderPending();renderOrders();renderVendors();renderUsers();renderChatVendors();renderMap();
+  renderMetrics();renderPending();renderOrders();renderVendors();renderUsers();renderResetRequests();renderChatVendors();renderMap();
 }
 function renderMetrics(){
   const online=state.presence.filter(p=>Date.now()-Number(p.updatedAt||0)<45000).length;
@@ -128,6 +130,9 @@ function renderPending(){const rows=state.vendors.filter(v=>!approved(v)&&!suspe
 function renderVendors(){let rows=state.vendors;const q=($('#vendorSearch')?.value||'').toLowerCase();if(state.vendorFilter==='pending')rows=rows.filter(v=>!approved(v)&&!suspended(v));if(q)rows=rows.filter(v=>`${v.crName} ${v.ownerAlias} ${v.businessType} ${v.crNumber}`.toLowerCase().includes(q));$('#vendorTable').innerHTML=rows.length?`<div class="table-wrap"><table class="table"><thead><tr><th>Vendor</th><th>CR</th><th>Status</th><th>Location</th><th>Actions</th></tr></thead><tbody>${rows.map(v=>`<tr><td>${esc(v.crName||'Unnamed')}<br><span class="muted">${esc(v.ownerAlias||'')}</span></td><td>${esc(v.crNumber||'')}<br><span class="muted">${esc(v.businessType||'')}</span></td><td>${status(v)}</td><td>${v.lat&&v.lng?`${Number(v.lat).toFixed(5)}, ${Number(v.lng).toFixed(5)}`:'Missing'}</td><td><button class="btn small primary" data-approve="${v.id}">Allow public</button> <button class="btn small" data-hide="${v.id}">Hide</button> <button class="btn small danger" data-suspend="${v.id}">${suspended(v)?'Unsuspend':'Suspend'}</button> <button class="btn small" data-chat="${v.id}">Chat</button></td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">No vendors found</div>';bindVendorActions()}
 function renderOrders(){const rows=state.orders.slice().sort((a,b)=>b.createdAt-a.createdAt);$('#orderTable').innerHTML=rows.length?`<div class="table-wrap"><table class="table"><thead><tr><th>Order</th><th>Vendor</th><th>Customer</th><th>Total</th><th>Status</th><th>GPS</th><th>Placed</th></tr></thead><tbody>${rows.map(o=>{const v=state.vendors.find(x=>x.id===o.vendorId);return `<tr><td>#${esc(o.orderNumber||o.id?.slice(-6)||'')}</td><td>${esc(v?.crName||o.vendorId||'')}</td><td>${esc(o.customerName||'')}<br><span class="muted">${esc(o.customerPhone||'')}</span></td><td>${money(o.total)}</td><td>${esc(o.status||'')}</td><td>${o.customerLat&&o.customerLng?`${Number(o.customerLat).toFixed(5)}, ${Number(o.customerLng).toFixed(5)}`:'-'}</td><td>${new Date(Number(o.createdAt||Date.now())).toLocaleString()}</td></tr>`}).join('')}</tbody></table></div>`:'<div class="empty">No orders yet</div>'}
 function renderUsers(){const rows=state.presence.slice().sort((a,b)=>b.updatedAt-a.updatedAt);$('#userTable').innerHTML=rows.length?`<div class="table-wrap"><table class="table"><thead><tr><th>Online</th><th>Mode</th><th>Role</th><th>Alias</th><th>Vendor</th><th>View</th><th>Last seen</th></tr></thead><tbody>${rows.map(p=>`<tr><td>${Date.now()-Number(p.updatedAt||0)<45000?'<span class="pill ok">Online</span>':'<span class="pill warn">Away</span>'}</td><td>${esc(p.mode)}</td><td>${esc(p.role)}</td><td>${esc(p.alias)}</td><td>${esc(state.vendors.find(v=>v.id===p.vendorId)?.crName||p.vendorId||'')}</td><td>${esc(p.view)}</td><td>${new Date(Number(p.updatedAt||Date.now())).toLocaleString()}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">No active sessions yet</div>'}
+async function hashPassword(pass){const data=new TextEncoder().encode(`omni-pos:${pass}`),buf=await crypto.subtle.digest('SHA-256',data);return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,'0')).join('')}
+function findAccount(alias){return new Promise(resolve=>{let found=null;root.get('accounts').get(alias).once(d=>{if(d?.vendorId)found=clean(d)},{wait:500});state.vendors.forEach(v=>{if(found)return;if(String(v.ownerAlias||'').toLowerCase()===alias)found={alias,role:'admin',vendorId:v.id};root.get('vendors').get(v.id).get('employees').map().once((e,k)=>{if(found||!e)return;const row={...clean(e),id:e.id||k};if(String(row.alias||'').toLowerCase()===alias)found={alias,role:row.role||'employee',vendorId:v.id,employeeId:row.id}})});setTimeout(()=>resolve(found),1500)})}
+function renderResetRequests(){const rows=state.resetRequests.slice().sort((a,b)=>Number(b.createdAt||0)-Number(a.createdAt||0));$('#resetTable').innerHTML=rows.length?`<div class="table-wrap"><table class="table"><thead><tr><th>User</th><th>Status</th><th>Message</th><th>Requested</th><th>Actions</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(r.alias||'')}</td><td>${r.status==='closed'?'<span class="pill ok">Closed</span>':'<span class="pill warn">Open</span>'}</td><td>${esc(r.message||'')}</td><td>${new Date(Number(r.createdAt||Date.now())).toLocaleString()}</td><td><button class="btn small primary" data-reset-pass="${r.id}" ${r.status==='closed'?'disabled':''}>Set temp pass</button> <button class="btn small" data-close-reset="${r.id}">Close</button></td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">No password reset requests</div>';$$('[data-reset-pass]').forEach(b=>b.onclick=async()=>{const r=state.resetRequests.find(x=>x.id===b.dataset.resetPass);if(!r)return;const temp=prompt(`Temporary password for ${r.alias}`,`Temp${Math.random().toString(36).slice(2,8)}!`);if(!temp)return;const account=await findAccount(String(r.alias||'').toLowerCase());if(!account?.vendorId)return alert('No vendor or employee account link was found for this username.');root.get('accounts').get(account.alias||r.alias).put({...account,tempPassHash:await hashPassword(temp),mustChangePassword:true,tempPassSetAt:Date.now(),updatedAt:Date.now()});root.get('passwordResets').get(r.id).put({status:'closed',tempSetAt:Date.now(),updatedAt:Date.now()});alert(`Temporary password set for ${r.alias}: ${temp}`)});$$('[data-close-reset]').forEach(b=>b.onclick=()=>root.get('passwordResets').get(b.dataset.closeReset).put({status:'closed',updatedAt:Date.now()}))}
 function renderChatVendors(){$('#chatVendors').innerHTML=state.vendors.length?state.vendors.map(v=>`<button class="row" style="text-align:left;color:inherit" data-select-chat="${v.id}"><img src="${v.logo||v.shopfront||''}" alt=""><span class="info"><h4>${esc(v.crName||'Unnamed')}</h4><p>${esc(state.chats.find(c=>c.id===v.id)?.lastText||'No messages')}</p></span></button>`).join(''):'<div class="empty">No vendors</div>';$$('[data-select-chat]').forEach(b=>b.onclick=()=>selectChat(b.dataset.selectChat))}
 function selectChat(id){state.selectedVendor=id;const v=state.vendors.find(x=>x.id===id);$('#chatTitle').textContent=v?.crName||'Vendor';state.messages=[];root.get('adminChats').get(id).get('messages').map().on((d,k)=>{upsert(state.messages,d,k);state.messages.sort((a,b)=>a.createdAt-b.createdAt);renderChatLog()});renderChatLog()}
 function renderChatLog(){$('#chatLog').innerHTML=state.messages.length?state.messages.map(m=>`<div class="msg ${m.from==='superadmin'?'superadmin':''}"><b>${m.from==='superadmin'?'SuperAdmin':'Vendor'}</b><p>${esc(m.text||'')}</p><div class="muted">${new Date(Number(m.createdAt||Date.now())).toLocaleString()}</div></div>`).join(''):'<div class="empty">No messages selected</div>'}
@@ -141,6 +146,7 @@ root.get('publicVendors').map().on((d,k)=>{upsert(state.publicVendors,d,k);rende
 root.get('ordersPublic').map().on((d,k)=>{upsert(state.orders,d,k);render()});
 root.get('customers').map().on((d,k)=>{upsert(state.customers,d,k);render()});
 root.get('presence').map().on((d,k)=>{upsert(state.presence,d,k);render()});
+root.get('passwordResets').map().on((d,k)=>{upsert(state.resetRequests,d,k);renderResetRequests()});
 root.get('adminChats').map().on((d,k)=>{upsert(state.chats,d,k);renderChatVendors()});
 })();
 </script>
