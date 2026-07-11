@@ -6,8 +6,18 @@
   const UI = global.SuperUI;
   const collections = global.OmniConfig.collections;
   const state = DB.state.cache;
+  let renderTimer = null;
 
   function rows(name){ return (state[name] || []).filter(row => row.deleted !== true); }
+  function appReady(){ return !!document.querySelector('.content .view'); }
+  function activeField(){
+    const el = document.activeElement;
+    return el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) ? el : null;
+  }
+  function isEditingField(){
+    const el = activeField();
+    return !!el && el.id !== 'globalSearch';
+  }
   function searchRows(list){
     const query = (document.getElementById('globalSearch')?.value || '').trim().toLowerCase();
     if(!query) return list;
@@ -89,6 +99,7 @@
   }
 
   function render(){
+    if(!appReady()) return;
     const view = UI.activeView();
     if(view === 'dashboard') renderDashboard();
     if(view === 'vendors') renderVendors();
@@ -100,9 +111,20 @@
     if(view === 'events') renderEvents();
   }
 
+  function scheduleRender(collection){
+    if(!appReady()) return;
+    if(collection === 'events' && UI.activeView() !== 'events' && UI.activeView() !== 'dashboard') return;
+    if(isEditingField()) return;
+    if(renderTimer) clearTimeout(renderTimer);
+    renderTimer = setTimeout(() => {
+      renderTimer = null;
+      render();
+    }, 120);
+  }
+
   async function exportAll(){
     const data = {};
-    for(const name of collections) data[name] = await DB.exportCollection(name);
+    for(const name of collections) data[name] = state[name] || [];
     U.downloadText(`omni-v2-backup-${U.todayKey()}.json`, JSON.stringify(data, null, 2), 'application/json');
   }
 
@@ -110,7 +132,7 @@
     UI.shell();
     UI.bindNav(render);
     DB.init(UI.setStatus);
-    collections.forEach(name => DB.subscribe(name, render, {includeDeleted:true}));
+    collections.forEach(name => DB.subscribe(name, () => scheduleRender(name), {includeDeleted:true}));
     document.getElementById('backupBtn').onclick = exportAll;
     document.getElementById('globalSearch').oninput = render;
     render();
