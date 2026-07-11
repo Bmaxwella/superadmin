@@ -134,7 +134,7 @@
     DB.init(UI.setStatus);
     collections.forEach(name => DB.subscribe(name, () => scheduleRender(name), {includeDeleted:true}));
     document.getElementById('backupBtn').onclick = exportAll;
-    document.getElementById('globalSearch').oninput = render;
+    document.getElementById('globalSearch').oninput = () => scheduleRender('search');
     render();
   }
 
