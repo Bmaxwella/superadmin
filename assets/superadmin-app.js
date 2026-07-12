@@ -7,6 +7,7 @@
   const collections = global.OmniConfig.collections;
   const state = DB.state.cache;
   let renderTimer = null;
+  const pendingRenders = new Set();
 
   function rows(name){ return (state[name] || []).filter(row => row.deleted !== true); }
   function appReady(){ return !!document.querySelector('.content .view'); }
@@ -18,6 +19,37 @@
     const el = activeField();
     return !!el && el.id !== 'globalSearch';
   }
+  function viewUsesCollection(collection){
+    const view = UI.activeView();
+    const dependencies = {
+      dashboard: new Set(['vendors','users','orders','creditAccounts','employeeShifts','presence']),
+      vendors: new Set(['vendors','publicVendors','products']),
+      users: new Set(['users','presence']),
+      orders: new Set(['orders']),
+      credit: new Set(['creditAccounts']),
+      attendance: new Set(['employeeShifts']),
+      events: new Set(['events'])
+    };
+    return collection === 'search' || collection === 'deferred' || view === 'database' || dependencies[view]?.has(collection);
+  }
+  function flushPendingRender(){
+    if(!pendingRenders.size || isEditingField()) return;
+    pendingRenders.clear();
+    scheduleRender('deferred');
+  }
+  function captureViewFields(view){
+    const container = document.getElementById(view);
+    if(!container) return [];
+    return [...container.querySelectorAll('input[id],select[id],textarea[id]')].map(field => ({id:field.id, value:field.value, checked:field.checked}));
+  }
+  function restoreViewFields(fields){
+    fields.forEach(saved => {
+      const field = document.getElementById(saved.id);
+      if(!field) return;
+      field.value = saved.value;
+      if(field.type === 'checkbox' || field.type === 'radio') field.checked = saved.checked;
+    });
+  }
   function searchRows(list){
     const query = (document.getElementById('globalSearch')?.value || '').trim().toLowerCase();
     if(!query) return list;
@@ -25,14 +57,20 @@
   }
   function vendorProducts(vendorId){ return rows('products').filter(p => p.vendorId === vendorId && p.active !== false); }
   function publicVendorPayload(vendor, overrides={}){
-    const products = vendorProducts(vendor.id).map(p=>({id:p.id,name:p.name,category:p.category||'',description:p.description||'',price:Number(p.price||0),image:p.image||'',barcode:p.barcode||'',qrCode:p.qrCode||'',sku:p.sku||'',stockQty:Number(p.stockQty||0),active:p.active!==false,updatedAt:p.updatedAt||Date.now()}));
+    const products = vendorProducts(vendor.id).map(p=>({id:p.id,name:p.name,category:p.category||'',description:p.description||'',itemType:p.itemType||'product',price:Number(p.price||0),compareAtPrice:Number(p.compareAtPrice||0),unit:p.unit||'each',taxRate:Number(p.taxRate||0),image:p.image||'',imagesJson:p.imagesJson||JSON.stringify(p.image?[p.image]:[]),attributesJson:p.attributesJson||'[]',barcode:p.barcode||'',qrCode:p.qrCode||'',sku:p.sku||'',stockMode:p.stockMode||'none',stockQty:Number(p.stockQty||0),lowStockThreshold:Number(p.lowStockThreshold||0),preparationMinutes:Number(p.preparationMinutes||0),featured:p.featured===true,active:p.active!==false,updatedAt:p.updatedAt||Date.now()}));
     return {...vendor, ...overrides, id:vendor.id, products:JSON.stringify(products), updatedAt:Date.now()};
   }
 
   function renderDashboard(){
     const m = global.SuperAnalytics.metrics(state);
+    const dailyMax = Math.max(1, ...m.dailyOrders.map(day => day.count));
+    const statusMax = Math.max(1, ...m.statusCounts.map(item => item.count));
     document.getElementById('dashboard').innerHTML = `
       <div class="grid cols-4">${m.cards.map(c=>UI.stat(c[0],c[1],c[2])).join('')}</div>
+      <div class="grid cols-2">
+        <div class="card pad"><div class="head"><h2>Orders · Last 7 Days</h2></div><div class="bar-chart">${m.dailyOrders.map(day=>`<div class="bar-row"><span>${U.esc(day.label)}</span><div class="bar-track"><i style="width:${Math.max(3,day.count/dailyMax*100)}%"></i></div><b>${day.count}</b><small>${U.money(day.revenue)}</small></div>`).join('')}</div></div>
+        <div class="card pad"><div class="head"><h2>Order Status</h2></div><div class="bar-chart status-chart">${m.statusCounts.map(item=>`<div class="bar-row"><span>${U.esc(item.status)}</span><div class="bar-track"><i style="width:${Math.max(3,item.count/statusMax*100)}%"></i></div><b>${item.count}</b></div>`).join('')}</div></div>
+      </div>
       <div class="grid split">
         <div class="card pad"><div class="head"><h2>Smart Analysis</h2></div>${m.insights.map(i=>`<div class="row"><div class="info"><h4>${U.esc(i)}</h4><p class="muted">Generated from loaded omni-v2 records.</p></div></div>`).join('')}</div>
         <div class="card pad"><div class="head"><h2>System Health</h2></div><p>Relays connected: <b>${DB.state.connectedRelays.size}</b></p><p>Collections loaded: <b>${collections.length}</b></p><p class="muted">Use Database to export/import records.</p></div>
@@ -68,12 +106,37 @@
 
   async function deleteUserAndRelated(user){
     if(!confirm(`Delete ${user.username || user.id} and related session/customer data?`)) return;
+    if(user.role === 'superadmin' && rows('users').filter(item => item.role === 'superadmin').length <= 1) return UI.toast('The last SuperAdmin account cannot be deleted','bad');
+    const meta = {userId:'superadmin', vendorId:user.vendorId || ''};
+    const removeRows = async (collection, predicate) => {
+      await Promise.all(rows(collection).filter(predicate).map(row => DB.softDelete(collection, row.id, {userId:'superadmin', vendorId:row.vendorId || user.vendorId || ''})));
+    };
     await DB.softDelete('users', user.id, {userId:'superadmin', vendorId:user.vendorId || ''});
-    await Promise.all(rows('presence').filter(p => p.userId === user.id || p.id === user.id || p.username === user.username).map(p => DB.softDelete('presence', p.id, {userId:'superadmin'})));
-    await Promise.all(rows('customers').filter(c => c.userId === user.id || c.id === user.customerId || c.phone === user.phone).map(c => DB.softDelete('customers', c.id, {userId:'superadmin'})));
-    await Promise.all(rows('creditAccounts').filter(c => c.customerId === user.customerId || c.phone === user.phone).map(c => DB.softDelete('creditAccounts', c.id, {userId:'superadmin', vendorId:c.vendorId || ''})));
-    await Promise.all(rows('passwordResets').filter(r => r.userId === user.id || r.username === user.username).map(r => DB.softDelete('passwordResets', r.id, {userId:'superadmin'})));
-    await DB.event('user_related_data_deleted','user',user.id,{summary:`Deleted user and related records for ${user.username || user.id}`},{userId:'superadmin'});
+    await removeRows('presence', row => row.userId === user.id || row.id === user.id || row.username === user.username);
+    await removeRows('passwordResets', row => row.userId === user.id || row.username === user.username);
+    await removeRows('messages', row => row.userId === user.id || row.senderUserId === user.id || row.recipientUserId === user.id);
+    await removeRows('notifications', row => row.userId === user.id || row.recipientUserId === user.id);
+    await removeRows('employeeShifts', row => row.userId === user.id || (user.employeeId && row.employeeId === user.employeeId));
+    await removeRows('employees', row => row.userId === user.id || (user.employeeId && row.id === user.employeeId));
+    const customerRows = rows('customers').filter(row => row.userId === user.id || row.id === user.customerId || (!!user.phone && row.phone === user.phone));
+    const customerIds = new Set([user.customerId, ...customerRows.map(row => row.id)].filter(Boolean));
+    await removeRows('customers', row => customerRows.some(customer => customer.id === row.id));
+    await removeRows('customerLocations', row => customerIds.has(row.customerId));
+    const customerCreditIds = new Set(rows('creditAccounts').filter(row => customerIds.has(row.customerId) || (!!user.phone && row.phone === user.phone)).map(row => row.id));
+    await removeRows('creditAccounts', row => customerCreditIds.has(row.id));
+    await removeRows('creditTransactions', row => customerCreditIds.has(row.creditAccountId));
+    const customerOrders = rows('orders').filter(row => customerIds.has(row.customerId));
+    const customerOrderIds = new Set(customerOrders.map(row => row.id));
+    await removeRows('orders', row => customerOrderIds.has(row.id));
+    await removeRows('orderItems', row => customerOrderIds.has(row.orderId));
+    await removeRows('payments', row => customerOrderIds.has(row.orderId));
+    if(user.role === 'vendor_owner' && user.vendorId) {
+      await removeRows('users', row => row.id !== user.id && row.vendorId === user.vendorId);
+      for(const collection of collections.filter(name => !['users','events','auditLogs'].includes(name))) {
+        await removeRows(collection, row => row.vendorId === user.vendorId || (['vendors','publicVendors'].includes(collection) && row.id === user.vendorId));
+      }
+    }
+    await DB.event('user_related_data_deleted','user',user.id,{summary:`Deleted user and related records for ${user.username || user.id}`},meta);
     UI.toast('User and related data deleted','ok');
   }
 
@@ -98,9 +161,10 @@
     ])}</div>`;
   }
 
-  function render(){
+  function render(preserveFields=false){
     if(!appReady()) return;
     const view = UI.activeView();
+    const fields = preserveFields ? captureViewFields(view) : [];
     if(view === 'dashboard') renderDashboard();
     if(view === 'vendors') renderVendors();
     if(view === 'users') renderUsers();
@@ -109,16 +173,20 @@
     if(view === 'attendance') renderSimple('attendance','Attendance','employeeShifts', [{key:'employeeId',label:'Employee'}, {key:'branchId',label:'Branch'}, {key:'status',label:'Status'}, {key:'checkInAt',label:'Check in',format:r=>r.checkInAt?new Date(Number(r.checkInAt)).toLocaleString():'-'}]);
     if(view === 'database') { document.getElementById('database').innerHTML = global.DatabaseBrowser.renderDatabase(state); global.DatabaseBrowser.bindDatabase(state, render); }
     if(view === 'events') renderEvents();
+    if(preserveFields) restoreViewFields(fields);
   }
 
   function scheduleRender(collection){
     if(!appReady()) return;
-    if(collection === 'events' && UI.activeView() !== 'events' && UI.activeView() !== 'dashboard') return;
-    if(isEditingField()) return;
+    if(!viewUsesCollection(collection)) return;
+    if(isEditingField()) {
+      pendingRenders.add(collection);
+      return;
+    }
     if(renderTimer) clearTimeout(renderTimer);
     renderTimer = setTimeout(() => {
       renderTimer = null;
-      render();
+      render(true);
     }, 120);
   }
 
@@ -135,6 +203,7 @@
     collections.forEach(name => DB.subscribe(name, () => scheduleRender(name), {includeDeleted:true}));
     document.getElementById('backupBtn').onclick = exportAll;
     document.getElementById('globalSearch').oninput = () => scheduleRender('search');
+    document.getElementById('app').onfocusout = () => setTimeout(flushPendingRender, 0);
     render();
   }
 

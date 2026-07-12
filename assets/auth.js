@@ -1,7 +1,7 @@
 (function(global){
   'use strict';
 
-  const KEY = 'omni_v2_session';
+  const KEY = 'omni_v2_superadmin_session';
 
   function savedSession(){
     return global.OmniUtils.parseJson(localStorage.getItem(KEY) || 'null', null);

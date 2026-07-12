@@ -29,7 +29,7 @@
       </aside>
       <main class="main">
         <div class="mobile-tabs" data-nav>
-          <button class="btn primary" data-view="dashboard">Dashboard</button><button class="btn" data-view="vendors">Vendors</button><button class="btn" data-view="users">Users</button><button class="btn" data-view="orders">Orders</button><button class="btn" data-view="database">Database</button><button class="btn" data-view="credit">Credit</button><button class="btn" data-view="events">Audit</button>
+          <button class="btn primary" data-view="dashboard">Dashboard</button><button class="btn" data-view="vendors">Vendors</button><button class="btn" data-view="users">Users</button><button class="btn" data-view="orders">Orders</button><button class="btn" data-view="credit">Credit</button><button class="btn" data-view="attendance">Attendance</button><button class="btn" data-view="database">Database</button><button class="btn" data-view="events">Audit</button>
         </div>
         <header class="top">
           <div class="search"><span>⌕</span><input id="globalSearch" placeholder="Search all loaded records"></div>

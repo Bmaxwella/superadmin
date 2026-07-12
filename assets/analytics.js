@@ -14,12 +14,23 @@
     const todaysOrders = orders.filter(o => U.todayKey(Number(o.createdAt || 0)) === today);
     const revenue = todaysOrders.filter(o => o.status !== 'cancelled').reduce((sum,o)=>sum+Number(o.total||0),0);
     const outstanding = credit.reduce((sum,c)=>sum+Number(c.balance||0),0);
+    const dailyOrders = Array.from({length:7}, (_, index) => {
+      const date = new Date();
+      date.setHours(0,0,0,0);
+      date.setDate(date.getDate() - (6 - index));
+      const key = U.todayKey(date.getTime());
+      const list = orders.filter(order => U.todayKey(Number(order.createdAt || 0)) === key);
+      return {key, label:date.toLocaleDateString(undefined,{weekday:'short'}), count:list.length, revenue:list.filter(order=>order.status!=='cancelled').reduce((sum,order)=>sum+Number(order.total||0),0)};
+    });
+    const statusCounts = ['pending','accepted','preparing','done','cancelled'].map(status => ({status, count:orders.filter(order => order.status === status).length}));
     return {
       vendors,
       orders,
       users,
       credit,
       shifts,
+      dailyOrders,
+      statusCounts,
       cards: [
         ['Vendors', vendors.length, {text:`${vendors.filter(v=>v.status==='pending').length} pending`, cls:'warn'}],
         ['Users', users.length, {text:'role based', cls:'ok'}],

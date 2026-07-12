@@ -32,6 +32,18 @@
     return [...priority.filter(key => all.includes(key)), ...all.filter(key => !priority.includes(key))].slice(0, 14);
   }
 
+  function cellDisplay(key, value){
+    if(value === true) return 'Yes';
+    if(value === false) return 'No';
+    if(value === null || value === undefined || value === '') return '—';
+    if(/(?:At|Date)$/i.test(key) && Number(value) > 1000000000000) {
+      try { return new Date(Number(value)).toLocaleString(); } catch {}
+    }
+    const text = String(value);
+    if((text.startsWith('{') || text.startsWith('[')) && text.length > 90) return `${text.slice(0,87)}…`;
+    return text.length > 140 ? `${text.slice(0,137)}…` : text;
+  }
+
   function selectedRecord(cache){
     const rows = collectionRows(cache, prefs.collection);
     return rows.find(row => row.id === prefs.editingId) || null;
@@ -48,7 +60,7 @@
     if(collection === 'users') return {...base, username:'new_user', displayName:'New User', role:'customer'};
     if(collection === 'vendors') return {...base, crName:'New Vendor', crNumber:'', businessType:'General', status:'pending', public:false, adminApproved:false, suspended:false};
     if(collection === 'publicVendors') return {...base, crName:'New Public Vendor', products:'[]', status:'approved', public:true};
-    if(collection === 'products') return {...base, vendorId:'', name:'New Product', price:0, category:'General'};
+    if(collection === 'products') return {...base, vendorId:'', name:'New Product', price:0, category:'General', itemType:'product', unit:'each', imagesJson:'[]', attributesJson:'[]', stockMode:'none', stockQty:0};
     if(collection === 'orders') return {...base, vendorId:'', status:'pending', total:0, paymentMethod:'cash'};
     return base;
   }
@@ -84,7 +96,8 @@
   function renderTable(rows){
     if(!rows.length) return '<div class="card empty">No records match this database view.</div>';
     const keys = visibleKeys(rows);
-    return `<div class="table-wrap db-table"><table class="table"><thead><tr><th>Actions</th>${keys.map(k=>`<th>${U.esc(k)}</th>`).join('')}</tr></thead><tbody>${rows.map(row=>`<tr class="${row.deleted===true?'deleted-row':''}"><td class="db-actions"><button class="btn small primary" data-edit-record="${U.esc(row.id)}">Edit</button>${row.deleted===true?` <button class="btn small" data-restore-record="${U.esc(row.id)}">Restore</button>`:` <button class="btn small danger" data-delete-record="${U.esc(row.id)}">Delete</button>`}</td>${keys.map(k=>`<td>${U.esc(String(row[k] ?? '').slice(0,180))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+    const visible = rows.slice(0,250);
+    return `<section class="card db-sheet"><div class="db-sheet-status"><b>${rows.length} matching records</b><span>${rows.length>visible.length?`Showing newest ${visible.length}`:'All records shown'} · ${keys.length} columns</span></div><div class="db-sheet-scroll"><table class="db-grid"><thead><tr><th class="db-action-column">Actions</th>${keys.map(k=>`<th title="${U.esc(k)}">${U.esc(k)}</th>`).join('')}</tr></thead><tbody>${visible.map(row=>`<tr class="${row.deleted===true?'deleted-row':''} ${prefs.editingId===row.id?'selected-row':''}"><td class="db-actions db-action-column"><button class="btn small primary" data-edit-record="${U.esc(row.id)}">Edit</button>${row.deleted===true?`<button class="btn small" data-restore-record="${U.esc(row.id)}">Restore</button>`:`<button class="btn small danger" data-delete-record="${U.esc(row.id)}">Delete</button>`}</td>${keys.map(k=>`<td title="${U.esc(String(row[k] ?? '').slice(0,300))}">${U.esc(cellDisplay(k,row[k]))}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>`;
   }
 
   function renderEditor(cache){
