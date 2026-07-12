@@ -154,6 +154,18 @@
     document.getElementById(id).innerHTML = `<div class="card pad"><div class="head"><h2>${U.esc(title)}</h2><span class="pill">${list.length} records</span></div>${UI.table(list, columns)}</div>`;
   }
 
+  function renderAttendance(){
+    const shifts=searchRows(rows('employeeShifts')).sort((a,b)=>Number(b.checkInAt||0)-Number(a.checkInAt||0));
+    const now=Date.now();
+    const duration=shift=>Math.max(0,(Number(shift.checkOutAt)||now)-Number(shift.checkInAt||now));
+    const totalHours=shifts.reduce((sum,shift)=>sum+duration(shift),0)/3600000;
+    const dayKeys=[...new Set(shifts.filter(shift=>shift.checkInAt).map(shift=>U.todayKey(Number(shift.checkInAt))))];
+    const employees=new Set(shifts.map(shift=>shift.employeeId||shift.userId).filter(Boolean));
+    const chartDays=Array.from({length:14},(_,index)=>{const date=new Date();date.setHours(0,0,0,0);date.setDate(date.getDate()-(13-index));const key=U.todayKey(date.getTime());const hours=shifts.filter(shift=>U.todayKey(Number(shift.checkInAt||0))===key).reduce((sum,shift)=>sum+duration(shift),0)/3600000;return {label:date.toLocaleDateString(undefined,{weekday:'short'}),hours};});
+    const maxHours=Math.max(1,...chartDays.map(day=>day.hours));
+    document.getElementById('attendance').innerHTML=`<div class="grid cols-4 attendance-metrics">${UI.stat('Hours recorded',totalHours.toFixed(1))}${UI.stat('Employees',employees.size)}${UI.stat('Days represented',dayKeys.length)}${UI.stat('Checked in now',shifts.filter(shift=>shift.status==='open').length,{text:'live',cls:'ok'})}</div><section class="card pad"><div class="head"><h2>Work hours · Last 14 days</h2></div><div class="attendance-chart">${chartDays.map(day=>`<div class="attendance-bar"><span style="height:${Math.max(day.hours?8:2,day.hours/maxHours*100)}%"></span><b>${day.hours?day.hours.toFixed(1):'0'}</b><small>${day.label}</small></div>`).join('')}</div></section><section class="card pad"><div class="head"><h2>Shift records</h2><span class="pill">${shifts.length} records</span></div>${UI.table(shifts,[{key:'employeeId',label:'Employee'},{key:'vendorId',label:'Vendor'},{key:'branchId',label:'Branch'},{key:'status',label:'Status'},{key:'checkInAt',label:'Check in',format:r=>r.checkInAt?new Date(Number(r.checkInAt)).toLocaleString():'-'},{key:'checkOutAt',label:'Check out',format:r=>r.checkOutAt?new Date(Number(r.checkOutAt)).toLocaleString():'-'},{key:'hours',label:'Hours',format:r=>(duration(r)/3600000).toFixed(2)}])}</section>`;
+  }
+
   function renderEvents(){
     const events = searchRows(rows('events')).sort((a,b)=>Number(b.createdAt||0)-Number(a.createdAt||0)).slice(0,200);
     document.getElementById('events').innerHTML = `<div class="card pad"><div class="head"><h2>Audit Log</h2></div>${UI.table(events, [
@@ -170,7 +182,7 @@
     if(view === 'users') renderUsers();
     if(view === 'orders') renderSimple('orders','Orders','orders', [{key:'id',label:'Order'}, {key:'vendorId',label:'Vendor'}, {key:'customerName',label:'Customer'}, {key:'status',label:'Status'}, {key:'total',label:'Total',format:r=>U.money(r.total)}]);
     if(view === 'credit') renderSimple('credit','Credit Accounts','creditAccounts', [{key:'phone',label:'Phone'}, {key:'vendorId',label:'Vendor'}, {key:'status',label:'Status'}, {key:'creditLimit',label:'Limit',format:r=>U.money(r.creditLimit)}, {key:'balance',label:'Balance',format:r=>U.money(r.balance)}]);
-    if(view === 'attendance') renderSimple('attendance','Attendance','employeeShifts', [{key:'employeeId',label:'Employee'}, {key:'branchId',label:'Branch'}, {key:'status',label:'Status'}, {key:'checkInAt',label:'Check in',format:r=>r.checkInAt?new Date(Number(r.checkInAt)).toLocaleString():'-'}]);
+    if(view === 'attendance') renderAttendance();
     if(view === 'database') { document.getElementById('database').innerHTML = global.DatabaseBrowser.renderDatabase(state); global.DatabaseBrowser.bindDatabase(state, render); }
     if(view === 'events') renderEvents();
     if(preserveFields) restoreViewFields(fields);
