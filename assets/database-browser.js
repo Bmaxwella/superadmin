@@ -10,6 +10,12 @@
     mode: 'create'
   };
 
+  function adminMeta(record={}){
+    const userId = global.OmniAdminContext?.userId;
+    if(!userId) throw new Error('SuperAdmin authentication is required.');
+    return {userId, vendorId:record.vendorId || ''};
+  }
+
   function escJson(value){
     return U.esc(JSON.stringify(value || {}, null, 2));
   }
@@ -168,8 +174,9 @@
 
   async function saveRecord(rerender){
     const record = normalizeRecord(parseEditorJson('recordJson'), prefs.collection);
-    await global.OmniDB.put(prefs.collection, record.id, record, {userId:'superadmin', vendorId:record.vendorId || ''});
-    await global.OmniDB.event(prefs.mode === 'edit' ? 'database_record_updated' : 'database_record_created', prefs.collection, record.id, {summary:`${prefs.mode === 'edit' ? 'Updated' : 'Created'} ${prefs.collection}/${record.id}`, vendorId:record.vendorId || ''}, {userId:'superadmin', vendorId:record.vendorId || ''});
+    const meta = adminMeta(record);
+    await global.OmniDB.put(prefs.collection, record.id, record, meta);
+    await global.OmniDB.event(prefs.mode === 'edit' ? 'database_record_updated' : 'database_record_created', prefs.collection, record.id, {summary:`${prefs.mode === 'edit' ? 'Updated' : 'Created'} ${prefs.collection}/${record.id}`, vendorId:record.vendorId || ''}, meta);
     prefs.mode = 'edit';
     prefs.editingId = record.id;
     global.SuperUI.toast('Record saved to GUN', 'ok');
@@ -178,9 +185,10 @@
 
   async function softDeleteRecord(id, rerender){
     if(!id) return;
+    if(prefs.collection === 'users' && id === global.OmniAdminContext?.userId) return global.SuperUI.toast('You cannot delete the SuperAdmin account currently in use', 'bad');
     if(!confirm(`Delete ${prefs.collection}/${id}? This marks the record deleted and keeps an audit trail.`)) return;
     const record = collectionRows(global.OmniDB.state.cache, prefs.collection).find(row => row.id === id) || {};
-    await global.OmniDB.softDelete(prefs.collection, id, {userId:'superadmin', vendorId:record.vendorId || ''});
+    await global.OmniDB.softDelete(prefs.collection, id, adminMeta(record));
     global.SuperUI.toast('Record deleted', 'ok');
     rerender();
   }
@@ -188,14 +196,16 @@
   async function restoreRecord(id, rerender){
     if(!id) return;
     const record = collectionRows(global.OmniDB.state.cache, prefs.collection).find(row => row.id === id) || {};
-    await global.OmniDB.patch(prefs.collection, id, {deleted:false, active:record.active === false ? true : record.active, deletedAt:''}, {userId:'superadmin', vendorId:record.vendorId || ''});
-    await global.OmniDB.event('database_record_restored', prefs.collection, id, {summary:`Restored ${prefs.collection}/${id}`, vendorId:record.vendorId || ''}, {userId:'superadmin', vendorId:record.vendorId || ''});
+    const meta = adminMeta(record);
+    await global.OmniDB.patch(prefs.collection, id, {deleted:false, active:record.active === false ? true : record.active, deletedAt:''}, meta);
+    await global.OmniDB.event('database_record_restored', prefs.collection, id, {summary:`Restored ${prefs.collection}/${id}`, vendorId:record.vendorId || ''}, meta);
     global.SuperUI.toast('Record restored', 'ok');
     rerender();
   }
 
   async function hardDeleteRecord(id, rerender){
     if(!id) return;
+    if(prefs.collection === 'users' && id === global.OmniAdminContext?.userId) return global.SuperUI.toast('You cannot delete the SuperAdmin account currently in use', 'bad');
     if(!global.OmniDB.state.connectedRelays.size) return global.SuperUI.toast('Connect to the relay before permanently deleting data', 'bad');
     const confirmation = `DELETE ${prefs.collection}/${id}`;
     if(prompt(`Permanent deletion cannot be restored from the app. Type exactly:\n${confirmation}`) !== confirmation) return;
@@ -248,12 +258,13 @@
     document.getElementById('newRecordTopBtn')?.addEventListener('click', () => { prefs.mode = 'create'; prefs.editingId = ''; rerender(); });
     document.getElementById('newRecordBtn')?.addEventListener('click', () => { prefs.mode = 'create'; prefs.editingId = ''; rerender(); });
     document.querySelectorAll('[data-edit-record]').forEach(btn => btn.onclick = () => { prefs.mode = 'edit'; prefs.editingId = btn.dataset.editRecord; rerender(); });
-    document.querySelectorAll('[data-delete-record]').forEach(btn => btn.onclick = () => softDeleteRecord(btn.dataset.deleteRecord, rerender));
-    document.querySelectorAll('[data-hard-delete-record]').forEach(btn => btn.onclick = () => hardDeleteRecord(btn.dataset.hardDeleteRecord, rerender));
-    document.querySelectorAll('[data-restore-record]').forEach(btn => btn.onclick = () => restoreRecord(btn.dataset.restoreRecord, rerender));
-    document.getElementById('editorDeleteBtn')?.addEventListener('click', () => softDeleteRecord(prefs.editingId, rerender));
-    document.getElementById('editorHardDeleteBtn')?.addEventListener('click', () => hardDeleteRecord(prefs.editingId, rerender));
-    document.getElementById('editorRestoreBtn')?.addEventListener('click', () => restoreRecord(prefs.editingId, rerender));
+    const runAction = (action, fallback) => async () => { try { await action(); } catch(error) { global.SuperUI.toast(error.message || fallback, 'bad'); } };
+    document.querySelectorAll('[data-delete-record]').forEach(btn => btn.onclick = runAction(() => softDeleteRecord(btn.dataset.deleteRecord, rerender), 'Record could not be deleted'));
+    document.querySelectorAll('[data-hard-delete-record]').forEach(btn => btn.onclick = runAction(() => hardDeleteRecord(btn.dataset.hardDeleteRecord, rerender), 'Record could not be permanently deleted'));
+    document.querySelectorAll('[data-restore-record]').forEach(btn => btn.onclick = runAction(() => restoreRecord(btn.dataset.restoreRecord, rerender), 'Record could not be restored'));
+    document.getElementById('editorDeleteBtn')?.addEventListener('click', runAction(() => softDeleteRecord(prefs.editingId, rerender), 'Record could not be deleted'));
+    document.getElementById('editorHardDeleteBtn')?.addEventListener('click', runAction(() => hardDeleteRecord(prefs.editingId, rerender), 'Record could not be permanently deleted'));
+    document.getElementById('editorRestoreBtn')?.addEventListener('click', runAction(() => restoreRecord(prefs.editingId, rerender), 'Record could not be restored'));
     document.getElementById('dbEditorForm')?.addEventListener('submit', async e => {
       e.preventDefault();
       try { await saveRecord(rerender); }
@@ -272,7 +283,7 @@
         const parsed = parseEditorJson('importJson');
         const rows = Array.isArray(parsed) ? parsed : [parsed];
         const normalized = rows.map(row => normalizeRecord(row, prefs.collection));
-        await global.OmniDB.importRows(prefs.collection, normalized, {userId:'superadmin'});
+        await global.OmniDB.importRows(prefs.collection, normalized, adminMeta(normalized[0] || {}));
         global.SuperUI.toast(`Imported ${normalized.length} row(s)`, 'ok');
         rerender();
       } catch(error) {

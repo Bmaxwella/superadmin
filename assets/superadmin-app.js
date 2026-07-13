@@ -7,9 +7,18 @@
   const collections = global.OmniConfig.collections;
   const state = DB.state.cache;
   let renderTimer = null;
+  let currentAdmin = null;
+  let presenceTimer = null;
+  let liveUnsubscribers = [];
   const pendingRenders = new Set();
 
   function rows(name){ return (state[name] || []).filter(row => row.deleted !== true); }
+  function adminId(){ return currentAdmin?.id || currentAdmin?.userId || ''; }
+  function adminMeta(record={}){
+    const userId = adminId();
+    if(!userId) throw new Error('SuperAdmin authentication is required.');
+    return {userId, vendorId:record.vendorId || ''};
+  }
   function appReady(){ return !!document.querySelector('.content .view'); }
   function activeField(){
     const el = document.activeElement;
@@ -71,7 +80,7 @@
       </div>
       <div class="grid split">
         <div class="card pad"><div class="head"><h2>Smart Analysis</h2></div>${m.insights.map(i=>`<div class="row"><div class="info"><h4>${U.esc(i)}</h4><p class="muted">Generated from loaded omni-v2 records.</p></div></div>`).join('')}</div>
-        <div class="card pad"><div class="head"><h2>System Health</h2></div><p>Relays connected: <b>${DB.state.connectedRelays.size}</b></p><p>Collections loaded: <b>${collections.length}</b></p><p class="muted">Use Database to export/import records.</p></div>
+        <div class="card pad"><div class="head"><h2>System Health</h2></div><p>Relays connected: <b>${DB.state.connectedRelays.size}</b></p><p>Collections loaded: <b>${DB.state.hydrated.size} / ${collections.length}</b></p><p class="muted">Database actions require a live relay confirmation.</p></div>
       </div>`;
   }
 
@@ -82,38 +91,48 @@
       {key:'status',label:'Status'}, {key:'public',label:'Public'}, {key:'lat',label:'Lat'}, {key:'lng',label:'Lng'}, {key:'updatedAt',label:'Updated',format:r=>r.updatedAt?new Date(Number(r.updatedAt)).toLocaleString():'-'}
     ], row => `<button class="btn small primary" data-approve="${row.id}">Approve</button> <button class="btn small" data-hide="${row.id}">Hide</button> <button class="btn small danger" data-suspend="${row.id}">Suspend</button>`)}</div>`;
     document.querySelectorAll('[data-approve]').forEach(btn => btn.onclick = async () => {
+      try {
       const vendor = rows('vendors').find(v=>v.id===btn.dataset.approve);
-      await DB.patch('vendors', btn.dataset.approve, {status:'approved', public:true, active:true, adminApproved:true, suspended:false, approvedAt:Date.now()}, {userId:'superadmin'});
-      await DB.put('publicVendors', btn.dataset.approve, publicVendorPayload({...vendor, id:btn.dataset.approve, crName:vendor?.crName || 'Vendor', status:'approved', public:true, active:true, adminApproved:true, suspended:false}), {userId:'superadmin', vendorId:btn.dataset.approve});
-      await DB.event('vendor_approved','vendor',btn.dataset.approve,{summary:'Vendor approved', vendorId:btn.dataset.approve},{userId:'superadmin'});
+      const meta = adminMeta({vendorId:btn.dataset.approve});
+      await DB.patch('vendors', btn.dataset.approve, {status:'approved', public:true, active:true, adminApproved:true, suspended:false, approvedAt:Date.now()}, meta);
+      await DB.put('publicVendors', btn.dataset.approve, publicVendorPayload({...vendor, id:btn.dataset.approve, crName:vendor?.crName || 'Vendor', status:'approved', public:true, active:true, adminApproved:true, suspended:false}), meta);
+      await DB.event('vendor_approved','vendor',btn.dataset.approve,{summary:'Vendor approved', vendorId:btn.dataset.approve},meta);
       UI.toast('Vendor approved and published','ok');
+      } catch(error) { UI.toast(error.message || 'Vendor could not be approved','bad'); }
     });
     document.querySelectorAll('[data-hide]').forEach(btn => btn.onclick = async () => {
+      try {
       const vendor = rows('vendors').find(v=>v.id===btn.dataset.hide) || {id:btn.dataset.hide, crName:'Vendor'};
-      await DB.patch('vendors', btn.dataset.hide, {public:false, active:false}, {userId:'superadmin'});
-      await DB.put('publicVendors', btn.dataset.hide, publicVendorPayload(vendor, {public:false, active:false}), {userId:'superadmin', vendorId:btn.dataset.hide});
+      const meta = adminMeta({vendorId:btn.dataset.hide});
+      await DB.patch('vendors', btn.dataset.hide, {public:false, active:false}, meta);
+      await DB.put('publicVendors', btn.dataset.hide, publicVendorPayload(vendor, {public:false, active:false}), meta);
       UI.toast('Vendor hidden from public market','ok');
+      } catch(error) { UI.toast(error.message || 'Vendor could not be hidden','bad'); }
     });
     document.querySelectorAll('[data-suspend]').forEach(btn => btn.onclick = async () => {
+      try {
       const vendor = rows('vendors').find(v=>v.id===btn.dataset.suspend) || {id:btn.dataset.suspend, crName:'Vendor'};
-      await DB.patch('vendors', btn.dataset.suspend, {status:'suspended', public:false, active:false, suspended:true}, {userId:'superadmin'});
-      await DB.put('publicVendors', btn.dataset.suspend, publicVendorPayload(vendor, {status:'suspended', public:false, active:false, suspended:true}), {userId:'superadmin', vendorId:btn.dataset.suspend});
+      const meta = adminMeta({vendorId:btn.dataset.suspend});
+      await DB.patch('vendors', btn.dataset.suspend, {status:'suspended', public:false, active:false, suspended:true}, meta);
+      await DB.put('publicVendors', btn.dataset.suspend, publicVendorPayload(vendor, {status:'suspended', public:false, active:false, suspended:true}), meta);
       UI.toast('Vendor suspended','ok');
+      } catch(error) { UI.toast(error.message || 'Vendor could not be suspended','bad'); }
     });
   }
 
   async function deleteUserAndRelated(user, permanent=false){
     const label = user.username || user.id;
+    if(user.id === adminId()) return UI.toast('You cannot delete the SuperAdmin account currently in use','bad');
     if(permanent) {
       if(!DB.state.connectedRelays.size) return UI.toast('Connect to the relay before permanently deleting a user', 'bad');
       if(prompt(`Permanently delete ${label} and every related record? Type exactly:\nDELETE ${label}`) !== `DELETE ${label}`) return;
     } else if(!confirm(`Soft delete ${label} and related session/customer data?`)) return;
     if(user.role === 'superadmin' && rows('users').filter(item => item.role === 'superadmin').length <= 1) return UI.toast('The last SuperAdmin account cannot be deleted','bad');
-    const meta = {userId:'superadmin', vendorId:user.vendorId || ''};
+    const meta = adminMeta(user);
     const sourceRows = collection => permanent ? (state[collection] || []) : rows(collection);
     const remove = (collection, id, row={}) => permanent
       ? DB.hardDelete(collection, id)
-      : DB.softDelete(collection, id, {userId:'superadmin', vendorId:row.vendorId || user.vendorId || ''});
+      : DB.softDelete(collection, id, {userId:adminId(), vendorId:row.vendorId || user.vendorId || ''});
     const removeRows = async (collection, predicate) => {
       await Promise.all(sourceRows(collection).filter(row => row.id && predicate(row)).map(row => remove(collection, row.id, row)));
     };
@@ -159,8 +178,14 @@
     document.getElementById('users').innerHTML = `<div class="card pad"><div class="head"><h2>Users & Roles</h2><span class="pill ok">${presence.filter(p=>Date.now()-Number(p.updatedAt||0)<60000).length} online</span></div>${UI.table(users, [
       {key:'username',label:'Username'}, {key:'displayName',label:'Name'}, {key:'role',label:'Role'}, {key:'vendorId',label:'Vendor'}, {key:'customerId',label:'Customer'}, {key:'phone',label:'Phone'}, {key:'lastLoginAt',label:'Last login',format:r=>r.lastLoginAt?new Date(Number(r.lastLoginAt)).toLocaleString():'-'}
     ], row => `<button class="btn small danger" data-delete-user="${row.id}">Soft delete related</button> <button class="btn small danger ghost-danger" data-hard-delete-user="${row.id}">Permanent delete related</button>`)}</div>`;
-    document.querySelectorAll('[data-delete-user]').forEach(btn => btn.onclick = async () => deleteUserAndRelated(rows('users').find(u=>u.id===btn.dataset.deleteUser) || {id:btn.dataset.deleteUser}, false));
-    document.querySelectorAll('[data-hard-delete-user]').forEach(btn => btn.onclick = async () => deleteUserAndRelated(rows('users').find(u=>u.id===btn.dataset.hardDeleteUser) || {id:btn.dataset.hardDeleteUser}, true));
+    document.querySelectorAll('[data-delete-user]').forEach(btn => btn.onclick = async () => {
+      try { await deleteUserAndRelated(rows('users').find(u=>u.id===btn.dataset.deleteUser) || {id:btn.dataset.deleteUser}, false); }
+      catch(error) { UI.toast(error.message || 'User could not be deleted','bad'); }
+    });
+    document.querySelectorAll('[data-hard-delete-user]').forEach(btn => btn.onclick = async () => {
+      try { await deleteUserAndRelated(rows('users').find(u=>u.id===btn.dataset.hardDeleteUser) || {id:btn.dataset.hardDeleteUser}, true); }
+      catch(error) { UI.toast(error.message || 'User could not be permanently deleted','bad'); }
+    });
   }
 
   function renderSimple(id, title, collection, columns){
@@ -217,20 +242,84 @@
   }
 
   async function exportAll(){
+    if(!DB.state.connectedRelays.size) throw new Error('Connect to the relay before exporting.');
+    await DB.hydrate();
     const data = {};
     for(const name of collections) data[name] = state[name] || [];
     U.downloadText(`omni-v2-backup-${U.todayKey()}.json`, JSON.stringify(data, null, 2), 'application/json');
   }
 
-  function boot(){
-    UI.shell();
+  function syncPresence(){
+    if(!currentAdmin) return;
+    DB.put('presence', adminId(), {id:adminId(), userId:adminId(), username:currentAdmin.username || '', role:'superadmin', mode:'superadmin', view:UI.activeView?.() || 'dashboard', online:true, updatedAt:Date.now()}, adminMeta()).catch(() => {});
+  }
+
+  function stopAdmin(){
+    clearInterval(presenceTimer);
+    presenceTimer = null;
+    liveUnsubscribers.forEach(unsubscribe => unsubscribe());
+    liveUnsubscribers = [];
+    pendingRenders.clear();
+  }
+
+  function startAdmin(user){
+    currentAdmin = {...user, id:user.id || user.userId};
+    global.OmniAdminContext = {userId:adminId(), username:currentAdmin.username || ''};
+    UI.shell(currentAdmin);
     UI.bindNav(render);
     DB.init(UI.setStatus);
-    collections.forEach(name => DB.subscribe(name, () => scheduleRender(name), {includeDeleted:true}));
-    document.getElementById('backupBtn').onclick = exportAll;
+    stopAdmin();
+    collections.forEach(name => liveUnsubscribers.push(DB.subscribe(name, () => scheduleRender(name), {includeDeleted:true})));
+    document.getElementById('backupBtn').onclick = async () => {
+      try { await exportAll(); UI.toast('Full database export created','ok'); }
+      catch(error) { UI.toast(error.message || 'Export failed','bad'); }
+    };
+    document.getElementById('logoutBtn').onclick = () => {
+      global.OmniAuth.clearSession();
+      delete global.OmniAdminContext;
+      currentAdmin = null;
+      stopAdmin();
+      boot();
+    };
     document.getElementById('globalSearch').oninput = () => scheduleRender('search');
     document.getElementById('app').onfocusout = () => setTimeout(flushPendingRender, 0);
+    syncPresence();
+    presenceTimer = setInterval(syncPresence, 30000);
     render();
+  }
+
+  function renderAuthGate(allowSetup=false){
+    UI.authGate({allowSetup});
+    UI.setStatus(DB.state.status);
+    document.getElementById('adminLoginForm').onsubmit = async event => {
+      event.preventDefault();
+      try { startAdmin(await global.OmniAuth.login(document.getElementById('adminLoginUsername').value, document.getElementById('adminLoginPassword').value)); }
+      catch(error) { UI.toast(error.message || 'Sign in failed','bad'); }
+    };
+    document.getElementById('adminSetupForm')?.addEventListener('submit', async event => {
+      event.preventDefault();
+      try { startAdmin(await global.OmniAuth.createInitialAdmin({displayName:document.getElementById('adminSetupName').value, username:document.getElementById('adminSetupUsername').value, password:document.getElementById('adminSetupPassword').value})); }
+      catch(error) { UI.toast(error.message || 'Initial SuperAdmin could not be created','bad'); }
+    });
+  }
+
+  async function boot(){
+    DB.init(UI.setStatus);
+    const session = global.OmniAuth.savedSession();
+    if(session?.userId) {
+      try {
+        const user = await DB.get('users', session.userId, 8000);
+        if(user && user.role === 'superadmin' && user.active !== false && user.deleted !== true) {
+          global.OmniAuth.saveSession(user);
+          startAdmin(user);
+          return;
+        }
+      } catch {}
+      global.OmniAuth.clearSession();
+    }
+    let allowSetup = false;
+    try { allowSetup = !(await global.OmniAuth.hasActiveAdmin()); } catch {}
+    renderAuthGate(allowSetup);
   }
 
   boot();
