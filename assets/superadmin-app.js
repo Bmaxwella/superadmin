@@ -55,10 +55,8 @@
     if(!query) return list;
     return list.filter(row => JSON.stringify(row).toLowerCase().includes(query));
   }
-  function vendorProducts(vendorId){ return rows('products').filter(p => p.vendorId === vendorId && p.active !== false); }
   function publicVendorPayload(vendor, overrides={}){
-    const products = vendorProducts(vendor.id).map(p=>({id:p.id,name:p.name,category:p.category||'',description:p.description||'',itemType:p.itemType||'product',price:Number(p.price||0),compareAtPrice:Number(p.compareAtPrice||0),unit:p.unit||'each',taxRate:Number(p.taxRate||0),image:p.image||'',imagesJson:p.imagesJson||JSON.stringify(p.image?[p.image]:[]),attributesJson:p.attributesJson||'[]',barcode:p.barcode||'',qrCode:p.qrCode||'',sku:p.sku||'',stockMode:p.stockMode||'none',stockQty:Number(p.stockQty||0),lowStockThreshold:Number(p.lowStockThreshold||0),preparationMinutes:Number(p.preparationMinutes||0),featured:p.featured===true,active:p.active!==false,updatedAt:p.updatedAt||Date.now()}));
-    return {...vendor, ...overrides, id:vendor.id, products:JSON.stringify(products), updatedAt:Date.now()};
+    return {...vendor, ...overrides, id:vendor.id, products:'[]', updatedAt:Date.now()};
   }
 
   function renderDashboard(){
@@ -104,40 +102,55 @@
     });
   }
 
-  async function deleteUserAndRelated(user){
-    if(!confirm(`Delete ${user.username || user.id} and related session/customer data?`)) return;
+  async function deleteUserAndRelated(user, permanent=false){
+    const label = user.username || user.id;
+    if(permanent) {
+      if(!DB.state.connectedRelays.size) return UI.toast('Connect to the relay before permanently deleting a user', 'bad');
+      if(prompt(`Permanently delete ${label} and every related record? Type exactly:\nDELETE ${label}`) !== `DELETE ${label}`) return;
+    } else if(!confirm(`Soft delete ${label} and related session/customer data?`)) return;
     if(user.role === 'superadmin' && rows('users').filter(item => item.role === 'superadmin').length <= 1) return UI.toast('The last SuperAdmin account cannot be deleted','bad');
     const meta = {userId:'superadmin', vendorId:user.vendorId || ''};
+    const sourceRows = collection => permanent ? (state[collection] || []) : rows(collection);
+    const remove = (collection, id, row={}) => permanent
+      ? DB.hardDelete(collection, id)
+      : DB.softDelete(collection, id, {userId:'superadmin', vendorId:row.vendorId || user.vendorId || ''});
     const removeRows = async (collection, predicate) => {
-      await Promise.all(rows(collection).filter(predicate).map(row => DB.softDelete(collection, row.id, {userId:'superadmin', vendorId:row.vendorId || user.vendorId || ''})));
+      await Promise.all(sourceRows(collection).filter(row => row.id && predicate(row)).map(row => remove(collection, row.id, row)));
     };
-    await DB.softDelete('users', user.id, {userId:'superadmin', vendorId:user.vendorId || ''});
+    await remove('users', user.id, user);
     await removeRows('presence', row => row.userId === user.id || row.id === user.id || row.username === user.username);
     await removeRows('passwordResets', row => row.userId === user.id || row.username === user.username);
     await removeRows('messages', row => row.userId === user.id || row.senderUserId === user.id || row.recipientUserId === user.id);
     await removeRows('notifications', row => row.userId === user.id || row.recipientUserId === user.id);
     await removeRows('employeeShifts', row => row.userId === user.id || (user.employeeId && row.employeeId === user.employeeId));
     await removeRows('employees', row => row.userId === user.id || (user.employeeId && row.id === user.employeeId));
-    const customerRows = rows('customers').filter(row => row.userId === user.id || row.id === user.customerId || (!!user.phone && row.phone === user.phone));
+    const customerRows = sourceRows('customers').filter(row => row.userId === user.id || row.id === user.customerId || (!!user.phone && row.phone === user.phone));
     const customerIds = new Set([user.customerId, ...customerRows.map(row => row.id)].filter(Boolean));
     await removeRows('customers', row => customerRows.some(customer => customer.id === row.id));
     await removeRows('customerLocations', row => customerIds.has(row.customerId));
-    const customerCreditIds = new Set(rows('creditAccounts').filter(row => customerIds.has(row.customerId) || (!!user.phone && row.phone === user.phone)).map(row => row.id));
+    const customerCreditIds = new Set(sourceRows('creditAccounts').filter(row => customerIds.has(row.customerId) || (!!user.phone && row.phone === user.phone)).map(row => row.id));
     await removeRows('creditAccounts', row => customerCreditIds.has(row.id));
     await removeRows('creditTransactions', row => customerCreditIds.has(row.creditAccountId));
-    const customerOrders = rows('orders').filter(row => customerIds.has(row.customerId));
+    const customerOrders = sourceRows('orders').filter(row => customerIds.has(row.customerId) || (!!user.phone && row.customerPhone === user.phone));
     const customerOrderIds = new Set(customerOrders.map(row => row.id));
     await removeRows('orders', row => customerOrderIds.has(row.id));
     await removeRows('orderItems', row => customerOrderIds.has(row.orderId));
     await removeRows('payments', row => customerOrderIds.has(row.orderId));
+    await removeRows('deliveryAssignments', row => customerOrderIds.has(row.orderId));
     if(user.role === 'vendor_owner' && user.vendorId) {
+      const relatedIds = new Set([user.vendorId]);
+      ['products','orders','employees','branches','creditAccounts','deliveryAssignments','threads'].forEach(collection => {
+        sourceRows(collection).filter(row => row.vendorId === user.vendorId).forEach(row => relatedIds.add(row.id));
+      });
+      sourceRows('users').filter(row => row.vendorId === user.vendorId).forEach(row => relatedIds.add(row.id));
       await removeRows('users', row => row.id !== user.id && row.vendorId === user.vendorId);
-      for(const collection of collections.filter(name => !['users','events','auditLogs'].includes(name))) {
-        await removeRows(collection, row => row.vendorId === user.vendorId || (['vendors','publicVendors'].includes(collection) && row.id === user.vendorId));
+      const excluded = permanent ? ['users'] : ['users','events','auditLogs'];
+      for(const collection of collections.filter(name => !excluded.includes(name))) {
+        await removeRows(collection, row => row.vendorId === user.vendorId || (['vendors','publicVendors'].includes(collection) && row.id === user.vendorId) || Object.entries(row).some(([key,value]) => /Id$/.test(key) && relatedIds.has(value)));
       }
     }
-    await DB.event('user_related_data_deleted','user',user.id,{summary:`Deleted user and related records for ${user.username || user.id}`},meta);
-    UI.toast('User and related data deleted','ok');
+    if(!permanent) await DB.event('user_related_data_deleted','user',user.id,{summary:`Soft deleted user and related records for ${label}`},meta);
+    UI.toast(permanent ? 'User and related data permanently removed' : 'User and related data soft deleted','ok');
   }
 
   function renderUsers(){
@@ -145,8 +158,9 @@
     const users = searchRows(rows('users'));
     document.getElementById('users').innerHTML = `<div class="card pad"><div class="head"><h2>Users & Roles</h2><span class="pill ok">${presence.filter(p=>Date.now()-Number(p.updatedAt||0)<60000).length} online</span></div>${UI.table(users, [
       {key:'username',label:'Username'}, {key:'displayName',label:'Name'}, {key:'role',label:'Role'}, {key:'vendorId',label:'Vendor'}, {key:'customerId',label:'Customer'}, {key:'phone',label:'Phone'}, {key:'lastLoginAt',label:'Last login',format:r=>r.lastLoginAt?new Date(Number(r.lastLoginAt)).toLocaleString():'-'}
-    ], row => `<button class="btn small danger" data-delete-user="${row.id}">Delete related</button>`)}</div>`;
-    document.querySelectorAll('[data-delete-user]').forEach(btn => btn.onclick = async () => deleteUserAndRelated(rows('users').find(u=>u.id===btn.dataset.deleteUser) || {id:btn.dataset.deleteUser}));
+    ], row => `<button class="btn small danger" data-delete-user="${row.id}">Soft delete related</button> <button class="btn small danger ghost-danger" data-hard-delete-user="${row.id}">Permanent delete related</button>`)}</div>`;
+    document.querySelectorAll('[data-delete-user]').forEach(btn => btn.onclick = async () => deleteUserAndRelated(rows('users').find(u=>u.id===btn.dataset.deleteUser) || {id:btn.dataset.deleteUser}, false));
+    document.querySelectorAll('[data-hard-delete-user]').forEach(btn => btn.onclick = async () => deleteUserAndRelated(rows('users').find(u=>u.id===btn.dataset.hardDeleteUser) || {id:btn.dataset.hardDeleteUser}, true));
   }
 
   function renderSimple(id, title, collection, columns){

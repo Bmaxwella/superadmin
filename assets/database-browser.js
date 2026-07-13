@@ -97,7 +97,7 @@
     if(!rows.length) return '<div class="card empty">No records match this database view.</div>';
     const keys = visibleKeys(rows);
     const visible = rows.slice(0,250);
-    return `<section class="card db-sheet"><div class="db-sheet-status"><b>${rows.length} matching records</b><span>${rows.length>visible.length?`Showing newest ${visible.length}`:'All records shown'} · ${keys.length} columns</span></div><div class="db-sheet-scroll"><table class="db-grid"><thead><tr><th class="db-action-column">Actions</th>${keys.map(k=>`<th title="${U.esc(k)}">${U.esc(k)}</th>`).join('')}</tr></thead><tbody>${visible.map(row=>`<tr class="${row.deleted===true?'deleted-row':''} ${prefs.editingId===row.id?'selected-row':''}"><td class="db-actions db-action-column"><button class="btn small primary" data-edit-record="${U.esc(row.id)}">Edit</button>${row.deleted===true?`<button class="btn small" data-restore-record="${U.esc(row.id)}">Restore</button>`:`<button class="btn small danger" data-delete-record="${U.esc(row.id)}">Delete</button>`}</td>${keys.map(k=>`<td title="${U.esc(String(row[k] ?? '').slice(0,300))}">${U.esc(cellDisplay(k,row[k]))}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>`;
+    return `<section class="card db-sheet"><div class="db-sheet-status"><b>${rows.length} matching records</b><span>${rows.length>visible.length?`Showing newest ${visible.length}`:'All records shown'} · ${keys.length} columns</span></div><div class="db-sheet-scroll"><table class="db-grid"><thead><tr><th class="db-action-column">Actions</th>${keys.map(k=>`<th title="${U.esc(k)}">${U.esc(k)}</th>`).join('')}</tr></thead><tbody>${visible.map(row=>`<tr class="${row.deleted===true?'deleted-row':''} ${prefs.editingId===row.id?'selected-row':''}"><td class="db-actions db-action-column"><button class="btn small primary" data-edit-record="${U.esc(row.id)}">Edit</button>${row.deleted===true?`<button class="btn small" data-restore-record="${U.esc(row.id)}">Restore</button>`:`<button class="btn small danger" data-delete-record="${U.esc(row.id)}">Delete</button>`}<button class="btn small danger ghost-danger" data-hard-delete-record="${U.esc(row.id)}">Permanent</button></td>${keys.map(k=>`<td title="${U.esc(String(row[k] ?? '').slice(0,300))}">${U.esc(cellDisplay(k,row[k]))}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>`;
   }
 
   function renderEditor(cache){
@@ -110,6 +110,7 @@
         <button class="btn primary">${prefs.mode === 'edit' ? 'Save changes' : 'Create record'}</button>
         ${prefs.mode === 'edit' && record?.deleted !== true ? '<button type="button" id="editorDeleteBtn" class="btn danger">Delete record</button>' : ''}
         ${prefs.mode === 'edit' && record?.deleted === true ? '<button type="button" id="editorRestoreBtn" class="btn">Restore record</button>' : ''}
+        ${prefs.mode === 'edit' ? '<button type="button" id="editorHardDeleteBtn" class="btn danger ghost-danger">Permanently delete</button>' : ''}
       </div>
       <p class="muted">Objects and arrays are saved as JSON strings so the GUN record stays compatible with the rest of the suite.</p>
     </form>`;
@@ -150,6 +151,10 @@
             <div class="field full"><label>Paste one record object or an array of records</label><textarea id="importJson" placeholder='[{"id":"..."}]'></textarea></div>
             <button id="importJsonBtn" class="btn primary">Import into selected collection</button>
           </div>
+          <div class="card pad db-danger-zone">
+            <div><span class="eyebrow">Danger zone</span><h2>Reset project data</h2><p class="muted">Permanently remove every loaded project record and discovery index before launch. Soft delete remains available for normal administration.</p></div>
+            <button id="purgeDatabaseBtn" class="btn danger">Purge all project data</button>
+          </div>
         </section>
       </div>`;
   }
@@ -189,6 +194,44 @@
     rerender();
   }
 
+  async function hardDeleteRecord(id, rerender){
+    if(!id) return;
+    if(!global.OmniDB.state.connectedRelays.size) return global.SuperUI.toast('Connect to the relay before permanently deleting data', 'bad');
+    const confirmation = `DELETE ${prefs.collection}/${id}`;
+    if(prompt(`Permanent deletion cannot be restored from the app. Type exactly:\n${confirmation}`) !== confirmation) return;
+    await global.OmniDB.hardDelete(prefs.collection, id);
+    if(prefs.editingId === id) {
+      prefs.editingId = '';
+      prefs.mode = 'create';
+    }
+    global.SuperUI.toast('Record permanently removed from the live graph', 'ok');
+    rerender();
+  }
+
+  async function purgeDatabase(rerender){
+    if(!global.OmniDB.state.connectedRelays.size) return global.SuperUI.toast('Connect to the relay before purging project data', 'bad');
+    if(prompt('This removes every OMNI project record. Type exactly:\nDELETE ALL OMNI DATA') !== 'DELETE ALL OMNI DATA') return;
+    const button = document.getElementById('purgeDatabaseBtn');
+    if(button) { button.disabled = true; button.textContent = 'Loading every collection...'; }
+    try {
+      await global.OmniDB.hydrate();
+      const missing = global.OmniConfig.collections.filter(name => !global.OmniDB.state.hydrated.has(name));
+      if(missing.length) throw new Error(`Cannot purge until all collections load: ${missing.join(', ')}`);
+      const targets = global.OmniConfig.collections.flatMap(collection => collectionRows(global.OmniDB.state.cache, collection).map(row => ({collection, id:row.id}))).filter(item => item.id);
+      for(let index=0; index<targets.length; index+=12) {
+        if(button) button.textContent = `Removing ${Math.min(index+12, targets.length)} of ${targets.length}...`;
+        await Promise.all(targets.slice(index,index+12).map(item => global.OmniDB.hardDelete(item.collection, item.id)));
+      }
+      prefs.editingId = '';
+      prefs.mode = 'create';
+      global.SuperUI.toast(`Permanently removed ${targets.length} project record(s)`, 'ok');
+      rerender();
+    } catch(error) {
+      global.SuperUI.toast(error.message || 'Project purge failed', 'bad');
+      if(button?.isConnected) { button.disabled = false; button.textContent = 'Purge all project data'; }
+    }
+  }
+
   function bindDatabase(cache, rerender){
     const select = document.getElementById('dbCollection');
     if(select) select.onchange = () => { prefs.collection = select.value; prefs.editingId = ''; prefs.mode = 'create'; rerender(); };
@@ -206,8 +249,10 @@
     document.getElementById('newRecordBtn')?.addEventListener('click', () => { prefs.mode = 'create'; prefs.editingId = ''; rerender(); });
     document.querySelectorAll('[data-edit-record]').forEach(btn => btn.onclick = () => { prefs.mode = 'edit'; prefs.editingId = btn.dataset.editRecord; rerender(); });
     document.querySelectorAll('[data-delete-record]').forEach(btn => btn.onclick = () => softDeleteRecord(btn.dataset.deleteRecord, rerender));
+    document.querySelectorAll('[data-hard-delete-record]').forEach(btn => btn.onclick = () => hardDeleteRecord(btn.dataset.hardDeleteRecord, rerender));
     document.querySelectorAll('[data-restore-record]').forEach(btn => btn.onclick = () => restoreRecord(btn.dataset.restoreRecord, rerender));
     document.getElementById('editorDeleteBtn')?.addEventListener('click', () => softDeleteRecord(prefs.editingId, rerender));
+    document.getElementById('editorHardDeleteBtn')?.addEventListener('click', () => hardDeleteRecord(prefs.editingId, rerender));
     document.getElementById('editorRestoreBtn')?.addEventListener('click', () => restoreRecord(prefs.editingId, rerender));
     document.getElementById('dbEditorForm')?.addEventListener('submit', async e => {
       e.preventDefault();
@@ -234,6 +279,7 @@
         global.SuperUI.toast(error.message || 'Import failed', 'bad');
       }
     });
+    document.getElementById('purgeDatabaseBtn')?.addEventListener('click', () => purgeDatabase(rerender));
   }
 
   global.DatabaseBrowser = { renderDatabase, bindDatabase };
