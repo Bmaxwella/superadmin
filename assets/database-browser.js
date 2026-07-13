@@ -20,6 +20,14 @@
     return U.esc(JSON.stringify(value || {}, null, 2));
   }
 
+  function recordForEditor(record){
+    const safe = {...(record || {})};
+    // Credentials are managed by the authentication flow, never by raw JSON edits.
+    delete safe.passwordHash;
+    delete safe.password;
+    return safe;
+  }
+
   function collectionRows(cache, collection){
     return cache[collection] || [];
   }
@@ -34,7 +42,7 @@
 
   function visibleKeys(rows){
     const priority = ['id','username','crName','name','vendorId','customerId','role','status','active','deleted','total','updatedAt'];
-    const all = [...new Set(rows.flatMap(row => Object.keys(row || {})))];
+    const all = [...new Set(rows.flatMap(row => Object.keys(row || {})))].filter(key => !['passwordHash','password'].includes(key));
     return [...priority.filter(key => all.includes(key)), ...all.filter(key => !priority.includes(key))].slice(0, 14);
   }
 
@@ -111,14 +119,14 @@
     const value = record || defaultRecord(prefs.collection);
     return `<form id="dbEditorForm" class="card pad form db-editor">
       <div class="head"><h2>${prefs.mode === 'edit' ? 'Edit Record' : 'Create Record'}</h2><span class="pill">${U.esc(prefs.collection)}</span><div class="spacer"></div>${prefs.mode === 'edit' ? '<button type="button" id="newRecordBtn" class="btn">New</button>' : ''}</div>
-      <div class="field full"><label>Record JSON</label><textarea id="recordJson" spellcheck="false">${escJson(value)}</textarea></div>
+      <div class="field full"><label>Record JSON</label><textarea id="recordJson" spellcheck="false">${escJson(record ? recordForEditor(record) : value)}</textarea></div>
       <div class="db-editor-actions">
         <button class="btn primary">${prefs.mode === 'edit' ? 'Save changes' : 'Create record'}</button>
         ${prefs.mode === 'edit' && record?.deleted !== true ? '<button type="button" id="editorDeleteBtn" class="btn danger">Delete record</button>' : ''}
         ${prefs.mode === 'edit' && record?.deleted === true ? '<button type="button" id="editorRestoreBtn" class="btn">Restore record</button>' : ''}
         ${prefs.mode === 'edit' ? '<button type="button" id="editorHardDeleteBtn" class="btn danger ghost-danger">Permanently delete</button>' : ''}
       </div>
-      <p class="muted">Objects and arrays are saved as JSON strings so the GUN record stays compatible with the rest of the suite.</p>
+      <p class="muted">Record IDs are fixed after creation. Credential fields are intentionally excluded from this editor. Objects and arrays are saved as JSON strings for suite compatibility.</p>
     </form>`;
   }
 
@@ -153,13 +161,13 @@
           ${renderTable(rows)}
           ${renderEditor(cache)}
           <div class="card pad form">
-            <div class="head"><h2>Import JSON</h2><span class="pill">${U.esc(prefs.collection)}</span></div>
-            <div class="field full"><label>Paste one record object or an array of records</label><textarea id="importJson" placeholder='[{"id":"..."}]'></textarea></div>
+            <div class="head"><h2>Import records</h2><span class="pill">${U.esc(prefs.collection)}</span></div>
+            <div class="field full"><label>Paste JSON (one object or array) or CSV with a header row</label><textarea id="importJson" placeholder='[{"id":"..."}] or id,name,status'></textarea></div>
             <button id="importJsonBtn" class="btn primary">Import into selected collection</button>
           </div>
           <div class="card pad db-danger-zone">
-            <div><span class="eyebrow">Danger zone</span><h2>Reset project data</h2><p class="muted">Permanently remove every loaded project record and discovery index before launch. Soft delete remains available for normal administration.</p></div>
-            <button id="purgeDatabaseBtn" class="btn danger">Purge all project data</button>
+            <div><span class="eyebrow">Danger zone</span><h2>Reset reachable live data</h2><p class="muted">Removes records currently reachable through the relay. Relay backups and historical disk data are not erased by a browser action; retain an export before using this.</p></div>
+            <button id="purgeDatabaseBtn" class="btn danger">Purge reachable live data</button>
           </div>
         </section>
       </div>`;
@@ -174,9 +182,17 @@
 
   async function saveRecord(rerender){
     const record = normalizeRecord(parseEditorJson('recordJson'), prefs.collection);
+    const existing = prefs.mode === 'edit' ? selectedRecord(global.OmniDB.state.cache) : null;
+    if(existing && record.id !== existing.id) throw new Error('Record ID cannot be changed. Create a new record instead.');
+    if(prefs.collection === 'users' && record.role === 'superadmin' && existing?.id !== global.OmniAdminContext?.userId) throw new Error('Create SuperAdmin accounts through the secure setup flow, not the raw data editor.');
     const meta = adminMeta(record);
-    await global.OmniDB.put(prefs.collection, record.id, record, meta);
-    await global.OmniDB.event(prefs.mode === 'edit' ? 'database_record_updated' : 'database_record_created', prefs.collection, record.id, {summary:`${prefs.mode === 'edit' ? 'Updated' : 'Created'} ${prefs.collection}/${record.id}`, vendorId:record.vendorId || ''}, meta);
+    if(existing) {
+      const changes = {...record};
+      delete changes.createdAt;
+      delete changes.passwordHash;
+      await global.OmniDB.patch(prefs.collection, existing.id, changes, meta);
+    } else await global.OmniDB.put(prefs.collection, record.id, record, meta);
+    try { await global.OmniDB.event(prefs.mode === 'edit' ? 'database_record_updated' : 'database_record_created', prefs.collection, record.id, {summary:`${prefs.mode === 'edit' ? 'Updated' : 'Created'} ${prefs.collection}/${record.id}`, vendorId:record.vendorId || ''}, meta); } catch {}
     prefs.mode = 'edit';
     prefs.editingId = record.id;
     global.SuperUI.toast('Record saved to GUN', 'ok');
@@ -198,7 +214,7 @@
     const record = collectionRows(global.OmniDB.state.cache, prefs.collection).find(row => row.id === id) || {};
     const meta = adminMeta(record);
     await global.OmniDB.patch(prefs.collection, id, {deleted:false, active:record.active === false ? true : record.active, deletedAt:''}, meta);
-    await global.OmniDB.event('database_record_restored', prefs.collection, id, {summary:`Restored ${prefs.collection}/${id}`, vendorId:record.vendorId || ''}, meta);
+    try { await global.OmniDB.event('database_record_restored', prefs.collection, id, {summary:`Restored ${prefs.collection}/${id}`, vendorId:record.vendorId || ''}, meta); } catch {}
     global.SuperUI.toast('Record restored', 'ok');
     rerender();
   }
@@ -224,21 +240,19 @@
     const button = document.getElementById('purgeDatabaseBtn');
     if(button) { button.disabled = true; button.textContent = 'Loading every collection...'; }
     try {
-      await global.OmniDB.hydrate();
-      const missing = global.OmniConfig.collections.filter(name => !global.OmniDB.state.hydrated.has(name));
-      if(missing.length) throw new Error(`Cannot purge until all collections load: ${missing.join(', ')}`);
-      const targets = global.OmniConfig.collections.flatMap(collection => collectionRows(global.OmniDB.state.cache, collection).map(row => ({collection, id:row.id}))).filter(item => item.id);
+      const remoteCollections = await Promise.all(global.OmniConfig.collections.map(collection => global.OmniDB.readOnce(collection, 3200).then(rows => ({collection, rows}))));
+      const targets = remoteCollections.flatMap(({collection, rows}) => rows.map(row => ({collection, id:row.id}))).filter(item => item.id);
       for(let index=0; index<targets.length; index+=12) {
         if(button) button.textContent = `Removing ${Math.min(index+12, targets.length)} of ${targets.length}...`;
         await Promise.all(targets.slice(index,index+12).map(item => global.OmniDB.hardDelete(item.collection, item.id)));
       }
       prefs.editingId = '';
       prefs.mode = 'create';
-      global.SuperUI.toast(`Permanently removed ${targets.length} project record(s)`, 'ok');
+      global.SuperUI.toast(`Removed ${targets.length} reachable live record(s)`, 'ok');
       rerender();
     } catch(error) {
       global.SuperUI.toast(error.message || 'Project purge failed', 'bad');
-      if(button?.isConnected) { button.disabled = false; button.textContent = 'Purge all project data'; }
+      if(button?.isConnected) { button.disabled = false; button.textContent = 'Purge reachable live data'; }
     }
   }
 
@@ -270,18 +284,20 @@
       try { await saveRecord(rerender); }
       catch(error) { global.SuperUI.toast(error.message || 'Record could not be saved', 'bad'); }
     });
-    document.getElementById('exportCsvBtn')?.addEventListener('click', () => {
-      const rows = filteredRows(cache, prefs.collection);
-      U.downloadText(`${prefs.collection}.csv`, U.toCsv(rows), 'text/csv');
-    });
-    document.getElementById('exportJsonBtn')?.addEventListener('click', () => {
-      const rows = filteredRows(cache, prefs.collection);
-      U.downloadText(`${prefs.collection}.json`, JSON.stringify(rows, null, 2), 'application/json');
-    });
+    const exportCurrent = async type => {
+      const rows = await global.OmniDB.exportCollection(prefs.collection);
+      const filtered = rows.filter(row => prefs.includeDeleted || row.deleted !== true);
+      U.downloadText(`${prefs.collection}.${type}`, type === 'csv' ? U.toCsv(filtered) : JSON.stringify(filtered, null, 2), type === 'csv' ? 'text/csv' : 'application/json');
+      global.SuperUI.toast(`Exported ${filtered.length} live relay record(s)`, 'ok');
+    };
+    document.getElementById('exportCsvBtn')?.addEventListener('click', () => exportCurrent('csv').catch(error => global.SuperUI.toast(error.message || 'Export failed', 'bad')));
+    document.getElementById('exportJsonBtn')?.addEventListener('click', () => exportCurrent('json').catch(error => global.SuperUI.toast(error.message || 'Export failed', 'bad')));
     document.getElementById('importJsonBtn')?.addEventListener('click', async () => {
       try {
-        const parsed = parseEditorJson('importJson');
-        const rows = Array.isArray(parsed) ? parsed : [parsed];
+        const raw = document.getElementById('importJson')?.value || '';
+        const parsed = U.parseJson(raw, undefined);
+        const rows = parsed === undefined ? U.fromCsv(raw) : (Array.isArray(parsed) ? parsed : [parsed]);
+        if(!rows.length) throw new Error('Provide a JSON record, JSON array, or CSV data with a header row.');
         const normalized = rows.map(row => normalizeRecord(row, prefs.collection));
         await global.OmniDB.importRows(prefs.collection, normalized, adminMeta(normalized[0] || {}));
         global.SuperUI.toast(`Imported ${normalized.length} row(s)`, 'ok');

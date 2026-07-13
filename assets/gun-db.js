@@ -13,7 +13,7 @@
     hydrated: new Set(),
     hydrationRuns: new Map(),
     pendingWrites: new Map(),
-    status: {online:false, count:0, text:'Connecting securely'}
+    status: {online:false, count:0, text:'Connecting to relay'}
   };
 
   function peerName(peer){
@@ -34,7 +34,7 @@
     state.root = state.gun.get(config.appRoot);
     state.gun.on('hi', peer => {
       state.connectedRelays.add(peerName(peer));
-      report({online:true, count:state.connectedRelays.size, text:state.pendingWrites.size ? `Connected · syncing ${state.pendingWrites.size} saved change${state.pendingWrites.size===1?'':'s'}` : state.hydrated.size ? `Data synced · ${state.hydrated.size} sections loaded` : 'Connected · loading saved data'});
+      report({online:true, count:state.connectedRelays.size, text:state.pendingWrites.size ? `Connected · confirming ${state.pendingWrites.size} change${state.pendingWrites.size===1?'':'s'}` : state.hydrated.size ? `Connected · live data stream active (${state.hydrated.size} sections read)` : 'Connected · reading live data'});
       setTimeout(() => state.subscriptions.forEach(subscription => hydrateSubscription(subscription, true)), 350);
     });
     state.gun.on('bye', peer => {
@@ -78,11 +78,6 @@
 
   function acceptRow(options, row, key){
     return !row || typeof options.accept !== 'function' || options.accept(row, key);
-  }
-
-  function rememberId(collection, id, updatedAt=Date.now()){
-    if(!id) return;
-    indexNode(collection, id).put({id, updatedAt:Number(updatedAt || Date.now())});
   }
 
   function parentKeys(chain, wait=1400){
@@ -136,7 +131,7 @@
       discovered.forEach(row => upsertCache(collection, row, row.id));
       state.hydrated.add(collection);
       callback?.(visibleRows(collection, options), null, null, {hydrated:true, count:discovered.size});
-      reportStatus(state.pendingWrites.size ? `Loading complete · ${state.pendingWrites.size} change${state.pendingWrites.size===1?'':'s'} waiting to sync` : `Data synced · ${state.hydrated.size} sections loaded`);
+      reportStatus(state.pendingWrites.size ? `Live data read · ${state.pendingWrites.size} change${state.pendingWrites.size===1?'':'s'} awaiting confirmation` : `Connected · live data stream active (${state.hydrated.size} sections read)`);
       return discovered.size;
     })().finally(() => state.hydrationRuns.delete(collection));
     state.hydrationRuns.set(collection, run);
@@ -193,7 +188,7 @@
       if(row) upsertCache(collection, row, id);
       else upsertCache(collection, null, id);
       if(state.pendingWrites.get(writeKey) === pending) state.pendingWrites.delete(writeKey);
-      reportStatus(`Data synced · ${state.hydrated.size} sections loaded`);
+      reportStatus(`Connected · change confirmed by relay`);
       return {ack, row, queued:false, synced:true};
     } catch(error) {
       if(state.pendingWrites.get(writeKey) === pending) state.pendingWrites.delete(writeKey);
@@ -264,8 +259,13 @@
 
   async function softDelete(collection, id, meta={}){
     const res = await patch(collection, id, {deleted:true, active:false, deletedAt:Date.now()}, meta);
-    await event('record_deleted', collection, id, {summary:`Soft deleted ${collection}/${id}`, vendorId:meta.vendorId || ''}, meta);
-    return res;
+    try {
+      await event('record_deleted', collection, id, {summary:`Soft deleted ${collection}/${id}`, vendorId:meta.vendorId || ''}, meta);
+      return res;
+    } catch(error) {
+      reportStatus('Record changed, but its audit entry could not be saved');
+      return {...res, auditError:error.message || 'Audit entry failed'};
+    }
   }
 
   async function hardDelete(collection, id){

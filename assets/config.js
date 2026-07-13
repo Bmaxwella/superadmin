@@ -7,6 +7,7 @@
     appRoot: 'omni-v2',
     schemaVersion: 3,
     currency: 'BHD',
+    timeZone: 'Asia/Bahrain',
     relayUrl,
     peers: [relayUrl],
     databaseOnly: true,

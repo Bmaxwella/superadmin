@@ -68,6 +68,21 @@
     return {...vendor, ...overrides, id:vendor.id, products:'[]', updatedAt:Date.now()};
   }
 
+  async function setVendorPublication(vendorId, changes, action){
+    const original = rows('vendors').find(vendor => vendor.id === vendorId);
+    if(!original) throw new Error('Vendor record was not found. Refresh the live data and try again.');
+    const meta = adminMeta({vendorId});
+    await DB.patch('vendors', vendorId, changes, meta);
+    try {
+      await DB.put('publicVendors', vendorId, publicVendorPayload(original, changes), meta);
+    } catch(error) {
+      // GUN has no transaction primitive. Restore the vendor state if publishing fails.
+      try { await DB.patch('vendors', vendorId, Object.fromEntries(Object.keys(changes).map(key => [key, original[key]])), meta); } catch {}
+      throw new Error(`Vendor update was rolled back because public listing could not be saved: ${error.message || 'relay error'}`);
+    }
+    try { await DB.event(action, 'vendor', vendorId, {summary:action.replace(/_/g, ' '), vendorId}, meta); } catch {}
+  }
+
   function renderDashboard(){
     const m = global.SuperAnalytics.metrics(state);
     const dailyMax = Math.max(1, ...m.dailyOrders.map(day => day.count));
@@ -92,29 +107,19 @@
     ], row => `<button class="btn small primary" data-approve="${row.id}">Approve</button> <button class="btn small" data-hide="${row.id}">Hide</button> <button class="btn small danger" data-suspend="${row.id}">Suspend</button>`)}</div>`;
     document.querySelectorAll('[data-approve]').forEach(btn => btn.onclick = async () => {
       try {
-      const vendor = rows('vendors').find(v=>v.id===btn.dataset.approve);
-      const meta = adminMeta({vendorId:btn.dataset.approve});
-      await DB.patch('vendors', btn.dataset.approve, {status:'approved', public:true, active:true, adminApproved:true, suspended:false, approvedAt:Date.now()}, meta);
-      await DB.put('publicVendors', btn.dataset.approve, publicVendorPayload({...vendor, id:btn.dataset.approve, crName:vendor?.crName || 'Vendor', status:'approved', public:true, active:true, adminApproved:true, suspended:false}), meta);
-      await DB.event('vendor_approved','vendor',btn.dataset.approve,{summary:'Vendor approved', vendorId:btn.dataset.approve},meta);
+      await setVendorPublication(btn.dataset.approve, {status:'approved', public:true, active:true, adminApproved:true, suspended:false, approvedAt:Date.now()}, 'vendor_approved');
       UI.toast('Vendor approved and published','ok');
       } catch(error) { UI.toast(error.message || 'Vendor could not be approved','bad'); }
     });
     document.querySelectorAll('[data-hide]').forEach(btn => btn.onclick = async () => {
       try {
-      const vendor = rows('vendors').find(v=>v.id===btn.dataset.hide) || {id:btn.dataset.hide, crName:'Vendor'};
-      const meta = adminMeta({vendorId:btn.dataset.hide});
-      await DB.patch('vendors', btn.dataset.hide, {public:false, active:false}, meta);
-      await DB.put('publicVendors', btn.dataset.hide, publicVendorPayload(vendor, {public:false, active:false}), meta);
+      await setVendorPublication(btn.dataset.hide, {public:false, active:false}, 'vendor_hidden');
       UI.toast('Vendor hidden from public market','ok');
       } catch(error) { UI.toast(error.message || 'Vendor could not be hidden','bad'); }
     });
     document.querySelectorAll('[data-suspend]').forEach(btn => btn.onclick = async () => {
       try {
-      const vendor = rows('vendors').find(v=>v.id===btn.dataset.suspend) || {id:btn.dataset.suspend, crName:'Vendor'};
-      const meta = adminMeta({vendorId:btn.dataset.suspend});
-      await DB.patch('vendors', btn.dataset.suspend, {status:'suspended', public:false, active:false, suspended:true}, meta);
-      await DB.put('publicVendors', btn.dataset.suspend, publicVendorPayload(vendor, {status:'suspended', public:false, active:false, suspended:true}), meta);
+      await setVendorPublication(btn.dataset.suspend, {status:'suspended', public:false, active:false, suspended:true}, 'vendor_suspended');
       UI.toast('Vendor suspended','ok');
       } catch(error) { UI.toast(error.message || 'Vendor could not be suspended','bad'); }
     });
@@ -139,7 +144,9 @@
     await remove('users', user.id, user);
     await removeRows('presence', row => row.userId === user.id || row.id === user.id || row.username === user.username);
     await removeRows('passwordResets', row => row.userId === user.id || row.username === user.username);
-    await removeRows('messages', row => row.userId === user.id || row.senderUserId === user.id || row.recipientUserId === user.id);
+    const userThreadIds = new Set(sourceRows('threads').filter(row => row.userId === user.id || row.createdBy === user.id || String(row.participantUserIdsJson || '').includes(user.id)).map(row => row.id));
+    await removeRows('threads', row => userThreadIds.has(row.id));
+    await removeRows('messages', row => userThreadIds.has(row.threadId) || row.userId === user.id || row.senderUserId === user.id || row.recipientUserId === user.id);
     await removeRows('notifications', row => row.userId === user.id || row.recipientUserId === user.id);
     await removeRows('employeeShifts', row => row.userId === user.id || (user.employeeId && row.employeeId === user.employeeId));
     await removeRows('employees', row => row.userId === user.id || (user.employeeId && row.id === user.employeeId));
@@ -177,7 +184,21 @@
     const users = searchRows(rows('users'));
     document.getElementById('users').innerHTML = `<div class="card pad"><div class="head"><h2>Users & Roles</h2><span class="pill ok">${presence.filter(p=>Date.now()-Number(p.updatedAt||0)<60000).length} online</span></div>${UI.table(users, [
       {key:'username',label:'Username'}, {key:'displayName',label:'Name'}, {key:'role',label:'Role'}, {key:'vendorId',label:'Vendor'}, {key:'customerId',label:'Customer'}, {key:'phone',label:'Phone'}, {key:'lastLoginAt',label:'Last login',format:r=>r.lastLoginAt?new Date(Number(r.lastLoginAt)).toLocaleString():'-'}
-    ], row => `<button class="btn small danger" data-delete-user="${row.id}">Soft delete related</button> <button class="btn small danger ghost-danger" data-hard-delete-user="${row.id}">Permanent delete related</button>`)}</div>`;
+    ], row => `<button class="btn small" data-reset-user="${row.id}">Set temp password</button> <button class="btn small danger" data-delete-user="${row.id}">Soft delete related</button> <button class="btn small danger ghost-danger" data-hard-delete-user="${row.id}">Permanent delete related</button>`)}</div>`;
+    document.querySelectorAll('[data-reset-user]').forEach(btn => btn.onclick = async () => {
+      try {
+        const user = rows('users').find(item => item.id === btn.dataset.resetUser);
+        if(!user) throw new Error('User record is not loaded.');
+        const temporaryPassword = prompt(`Set a temporary password for ${user.username || user.id}.`);
+        if(!temporaryPassword) return;
+        if(temporaryPassword.length < 8) throw new Error('Temporary passwords must be at least 8 characters.');
+        await DB.patch('users', user.id, {passwordHash:await global.OmniAuth.hashPassword(temporaryPassword), mustChangePassword:true, passwordResetAt:Date.now()}, adminMeta(user));
+        const pending = rows('passwordResets').filter(request => request.userId === user.id && request.status !== 'resolved');
+        await Promise.all(pending.map(request => DB.patch('passwordResets', request.id, {status:'resolved', resolvedAt:Date.now(), resolvedBy:adminId()}, adminMeta(user))));
+        try { await DB.event('temporary_password_set', 'user', user.id, {summary:`Temporary password set for ${user.username || user.id}`, vendorId:user.vendorId || ''}, adminMeta(user)); } catch {}
+        UI.toast('Temporary password saved. Give it to the user securely.', 'ok');
+      } catch(error) { UI.toast(error.message || 'Temporary password could not be saved', 'bad'); }
+    });
     document.querySelectorAll('[data-delete-user]').forEach(btn => btn.onclick = async () => {
       try { await deleteUserAndRelated(rows('users').find(u=>u.id===btn.dataset.deleteUser) || {id:btn.dataset.deleteUser}, false); }
       catch(error) { UI.toast(error.message || 'User could not be deleted','bad'); }
@@ -243,9 +264,8 @@
 
   async function exportAll(){
     if(!DB.state.connectedRelays.size) throw new Error('Connect to the relay before exporting.');
-    await DB.hydrate();
     const data = {};
-    for(const name of collections) data[name] = state[name] || [];
+    for(const name of collections) data[name] = await DB.exportCollection(name);
     U.downloadText(`omni-v2-backup-${U.todayKey()}.json`, JSON.stringify(data, null, 2), 'application/json');
   }
 
@@ -254,7 +274,11 @@
     DB.put('presence', adminId(), {id:adminId(), userId:adminId(), username:currentAdmin.username || '', role:'superadmin', mode:'superadmin', view:UI.activeView?.() || 'dashboard', online:true, updatedAt:Date.now()}, adminMeta()).catch(() => {});
   }
 
-  function stopAdmin(){
+  function stopAdmin(markOffline=false){
+    const departingId = adminId();
+    if(markOffline && departingId && DB.state.connectedRelays.size) {
+      DB.patch('presence', departingId, {online:false, updatedAt:Date.now()}, {userId:departingId}).catch(() => {});
+    }
     clearInterval(presenceTimer);
     presenceTimer = null;
     liveUnsubscribers.forEach(unsubscribe => unsubscribe());
@@ -277,8 +301,8 @@
     document.getElementById('logoutBtn').onclick = () => {
       global.OmniAuth.clearSession();
       delete global.OmniAdminContext;
+      stopAdmin(true);
       currentAdmin = null;
-      stopAdmin();
       boot();
     };
     document.getElementById('globalSearch').oninput = () => scheduleRender('search');
