@@ -330,6 +330,8 @@
   async function boot(){
     DB.init(UI.setStatus);
     const session = global.OmniAuth.savedSession();
+    // Never leave the page blank while a remote account lookup is in progress.
+    renderAuthGate(false);
     if(session?.userId) {
       try {
         const user = await DB.get('users', session.userId, 8000);
@@ -343,7 +345,7 @@
     }
     let allowSetup = false;
     try { allowSetup = !(await global.OmniAuth.hasActiveAdmin()); } catch {}
-    renderAuthGate(allowSetup);
+    if(!currentAdmin && allowSetup) renderAuthGate(true);
   }
 
   boot();
