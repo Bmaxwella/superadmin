@@ -162,7 +162,7 @@
       const timer = setTimeout(() => {
         if(settled) return;
         settled = true;
-        reject(new Error('The database relay did not confirm this write. Its final state is unknown; do not repeat the action until you refresh the live record.'));
+        reject(new Error('Relay index acknowledgement timed out.'));
       }, timeout);
       chain.put(payload, ack => {
         if(settled) return;
@@ -223,36 +223,57 @@
     return tryWrite(1);
   }
 
-  async function writeRecord(collection, id, payload, row, previous, options={}){
+  function confirmRecordWrite(collection, id, payload, pending, attempt=1){
+    return new Promise(resolve => {
+      let acknowledged = false;
+      const chain = node(collection, id);
+      const verifyTimer = setTimeout(async () => {
+        if(acknowledged) return;
+        if(state.pendingWrites.get(`${collection}/${id}`) !== pending) return resolve({ok:true, superseded:true});
+        const committed = await verifyRelayRevision(collection, id, payload, 6000);
+        if(committed) return resolve({ok:true, verified:true});
+        if(attempt < 3) return resolve(confirmRecordWrite(collection, id, payload, pending, attempt + 1));
+        resolve({ok:false, error:'The relay did not return or verify the saved revision.'});
+      }, attempt === 1 ? 2500 : 4000);
+      chain.put(payload, ack => {
+        if(acknowledged) return;
+        if(state.pendingWrites.get(`${collection}/${id}`) !== pending) return resolve({ok:true, superseded:true});
+        if(ack?.err) return;
+        acknowledged = true;
+        clearTimeout(verifyTimer);
+        resolve({ok:true, ack:ack || {}});
+      });
+    });
+  }
+
+  function writeRecord(collection, id, payload, row, previous, options={}){
     if(!state.connectedRelays.size) throw new Error('Database relay is disconnected. Reconnect before saving.');
     const writeKey = `${collection}/${id}`;
     const startedAt = Date.now();
     const pending = {collection, id, startedAt, operation:options.operation || 'write'};
     state.pendingWrites.set(writeKey, pending);
-    try {
-      // The record is the source of truth. Index writes improve discovery but must not
-      // turn a confirmed record save into a false "nothing was saved" failure.
-      let ack;
-      try {
-        ack = await writeAcknowledged(node(collection, id), payload);
-      } catch(error) {
-        if(!String(error?.message || '').includes('did not confirm this write')) throw error;
-        const committed = await verifyRelayRevision(collection, id, payload);
-        if(!committed) throw error;
-        ack = {ok:true, verified:true};
+    if(row) upsertCache(collection, row, id);
+    else upsertCache(collection, null, id);
+    reportStatus('Connected · saving change');
+    confirmRecordWrite(collection, id, payload, pending).then(result => {
+      if(state.pendingWrites.get(writeKey) !== pending) return;
+      state.pendingWrites.delete(writeKey);
+      if(result.ok) {
+        repairIndex(collection, id, row, options.removeIndex).catch(() => {});
+        reportStatus('Connected · change confirmed by relay');
+        return;
       }
-      repairIndex(collection, id, row, options.removeIndex).catch(() => {});
-      if(row) upsertCache(collection, row, id);
-      else upsertCache(collection, null, id);
-      if(state.pendingWrites.get(writeKey) === pending) state.pendingWrites.delete(writeKey);
-      reportStatus(`Connected · change confirmed by relay`);
-      return {ack, row, queued:false, synced:true};
-    } catch(error) {
-      if(state.pendingWrites.get(writeKey) === pending) state.pendingWrites.delete(writeKey);
+      restoreCache(collection, id, previous);
+      reportStatus(`Database sync error · ${result.error}`);
+      state.listeners.syncError?.({collection, id, error:result.error});
+    }).catch(error => {
+      if(state.pendingWrites.get(writeKey) !== pending) return;
+      state.pendingWrites.delete(writeKey);
       restoreCache(collection, id, previous);
       reportStatus(`Database sync error · ${error.message || 'write rejected'}`);
-      throw error;
-    }
+      state.listeners.syncError?.({collection, id, error:error.message || 'write rejected'});
+    });
+    return Promise.resolve({ack:{queued:true}, row, queued:true, synced:false});
   }
 
   function subscribe(collection, callback, options={}){
