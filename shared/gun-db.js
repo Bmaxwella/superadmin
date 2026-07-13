@@ -162,7 +162,7 @@
       const timer = setTimeout(() => {
         if(settled) return;
         settled = true;
-        reject(new Error('The database relay did not confirm this write. Nothing was saved.'));
+        reject(new Error('The database relay did not confirm this write. Its final state is unknown; do not repeat the action until you refresh the live record.'));
       }, timeout);
       chain.put(payload, ack => {
         if(settled) return;
@@ -174,6 +174,16 @@
     });
   }
 
+  function repairIndex(collection, id, row, removeIndex=false){
+    const payload = removeIndex ? null : {id, updatedAt:Number(row?.updatedAt || Date.now())};
+    const tryWrite = attempt => writeAcknowledged(indexNode(collection, id), payload, 10000).catch(error => {
+      if(attempt < 2) return new Promise(resolve => setTimeout(resolve, 1500 * attempt)).then(() => tryWrite(attempt + 1));
+      reportStatus('Record saved. Its discovery index is delayed and will be repaired after reconnecting.');
+      return null;
+    });
+    return tryWrite(1);
+  }
+
   async function writeRecord(collection, id, payload, row, previous, options={}){
     if(!state.connectedRelays.size) throw new Error('Database relay is disconnected. Reconnect before saving.');
     const writeKey = `${collection}/${id}`;
@@ -181,10 +191,10 @@
     const pending = {collection, id, startedAt, operation:options.operation || 'write'};
     state.pendingWrites.set(writeKey, pending);
     try {
-      const [ack] = await Promise.all([
-        writeAcknowledged(node(collection, id), payload),
-        writeAcknowledged(indexNode(collection, id), options.removeIndex ? null : {id, updatedAt:Number(row?.updatedAt || startedAt)})
-      ]);
+      // The record is the source of truth. Index writes improve discovery but must not
+      // turn a confirmed record save into a false "nothing was saved" failure.
+      const ack = await writeAcknowledged(node(collection, id), payload);
+      repairIndex(collection, id, row, options.removeIndex).catch(() => {});
       if(row) upsertCache(collection, row, id);
       else upsertCache(collection, null, id);
       if(state.pendingWrites.get(writeKey) === pending) state.pendingWrites.delete(writeKey);
