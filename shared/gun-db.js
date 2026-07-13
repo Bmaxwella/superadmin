@@ -156,7 +156,7 @@
     else upsertCache(collection, null, id);
   }
 
-  function writeAcknowledged(chain, payload, timeout=15000){
+  function writeAcknowledged(chain, payload, timeout=20000){
     return new Promise((resolve, reject) => {
       let settled = false;
       const timer = setTimeout(() => {
@@ -171,6 +171,45 @@
         if(ack?.err) reject(new Error(String(ack.err)));
         else resolve(ack || {});
       });
+    });
+  }
+
+  function sameRevision(remote, payload){
+    if(payload === null) return remote === null;
+    if(!remote || typeof remote !== 'object') return false;
+    if(payload.id && remote.id !== payload.id) return false;
+    if(payload.updatedAt && Number(remote.updatedAt) !== Number(payload.updatedAt)) return false;
+    return Object.keys(payload).filter(key => key !== '_').every(key => {
+      const expected = payload[key];
+      const actual = remote[key];
+      return expected && typeof expected === 'object'
+        ? JSON.stringify(actual) === JSON.stringify(expected)
+        : actual === expected;
+    });
+  }
+
+  function verifyRelayRevision(collection, id, payload, timeout=12000){
+    return new Promise(resolve => {
+      let settled = false;
+      let timer;
+      const reader = Gun({peers:config.peers, localStorage:false, retry:2});
+      const chain = reader.get(config.appRoot).get(collection).get(id);
+      const finish = value => {
+        if(settled) return;
+        const clean = value && typeof value === 'object' ? utils.cleanGun(value) : null;
+        if(!sameRevision(clean, payload)) return;
+        settled = true;
+        clearTimeout(timer);
+        chain.off();
+        resolve(true);
+      };
+      timer = setTimeout(() => {
+        if(settled) return;
+        settled = true;
+        chain.off();
+        resolve(false);
+      }, timeout);
+      chain.on(finish);
     });
   }
 
@@ -193,7 +232,15 @@
     try {
       // The record is the source of truth. Index writes improve discovery but must not
       // turn a confirmed record save into a false "nothing was saved" failure.
-      const ack = await writeAcknowledged(node(collection, id), payload);
+      let ack;
+      try {
+        ack = await writeAcknowledged(node(collection, id), payload);
+      } catch(error) {
+        if(!String(error?.message || '').includes('did not confirm this write')) throw error;
+        const committed = await verifyRelayRevision(collection, id, payload);
+        if(!committed) throw error;
+        ack = {ok:true, verified:true};
+      }
       repairIndex(collection, id, row, options.removeIndex).catch(() => {});
       if(row) upsertCache(collection, row, id);
       else upsertCache(collection, null, id);
