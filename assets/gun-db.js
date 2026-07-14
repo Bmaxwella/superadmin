@@ -239,7 +239,6 @@
         if(acknowledged) return;
         if(state.pendingWrites.get(`${collection}/${id}`) !== pending) return resolve({ok:true, superseded:true});
         if(ack?.err) return;
-        if(!pending.hadRelay) return;
         acknowledged = true;
         clearTimeout(verifyTimer);
         resolve({ok:true, ack:ack || {}});
